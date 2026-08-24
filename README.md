@@ -1,9 +1,11 @@
 # Google Drive Docs Bundle
 
+[![Latest version](https://img.shields.io/packagist/v/borsche/google-drive-docs-bundle.svg)](https://packagist.org/packages/borsche/google-drive-docs-bundle)
 [![CI](https://github.com/YlikScherbak/google-drive-docs-bundle/actions/workflows/ci.yml/badge.svg)](https://github.com/YlikScherbak/google-drive-docs-bundle/actions/workflows/ci.yml)
-[![PHP](https://img.shields.io/badge/php-8.1%2B-777bb4.svg)](https://www.php.net/)
+[![PHP](https://img.shields.io/packagist/dependency-v/borsche/google-drive-docs-bundle/php.svg)](https://www.php.net/)
 [![Symfony](https://img.shields.io/badge/symfony-6.x%20%7C%207.x-000000.svg)](https://symfony.com/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Downloads](https://img.shields.io/packagist/dt/borsche/google-drive-docs-bundle.svg)](https://packagist.org/packages/borsche/google-drive-docs-bundle)
+[![License](https://img.shields.io/packagist/l/borsche/google-drive-docs-bundle.svg)](LICENSE)
 
 A Symfony bundle that turns a **Google Shared Drive into a document workspace inside your own application**.
 
