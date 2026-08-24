@@ -1,0 +1,51 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Borsche\GoogleDriveDocsBundle\DependencyInjection;
+
+use Symfony\Component\Config\Definition\Builder\TreeBuilder;
+use Symfony\Component\Config\Definition\ConfigurationInterface;
+
+class Configuration implements ConfigurationInterface
+{
+    public const MIME_SPREADSHEET = 'application/vnd.google-apps.spreadsheet';
+    public const MIME_DOCUMENT    = 'application/vnd.google-apps.document';
+    public const MIME_PRESENTATION = 'application/vnd.google-apps.presentation';
+
+    public function getConfigTreeBuilder(): TreeBuilder
+    {
+        $treeBuilder = new TreeBuilder('google_drive_docs');
+
+        $treeBuilder->getRootNode()
+            ->children()
+                ->scalarNode('client_id')
+                    ->defaultValue('')
+                    ->info('OAuth client ID (Desktop app) from Google Cloud Console.')
+                ->end()
+                ->scalarNode('client_secret')
+                    ->defaultValue('')
+                    ->info('OAuth client secret. Keep it out of version control.')
+                ->end()
+                ->scalarNode('refresh_token')
+                    ->defaultValue('')
+                    ->info('Long-lived refresh token obtained via google-drive-docs:authorize.')
+                ->end()
+                ->scalarNode('shared_drive_id')
+                    ->defaultValue('')
+                    ->info('ID of the Shared Drive that stores the documents.')
+                ->end()
+                ->arrayNode('document_mime_types')
+                    ->scalarPrototype()->end()
+                    ->defaultValue([self::MIME_SPREADSHEET])
+                    ->info('Google MIME types treated as documents. Folders are always included.')
+                ->end()
+                ->booleanNode('notify_on_share')
+                    ->defaultFalse()
+                    ->info('Send Google notification e-mails when granting access.')
+                ->end()
+            ->end();
+
+        return $treeBuilder;
+    }
+}

@@ -1,0 +1,42 @@
+{
+    "name": "borsche/google-drive-docs-bundle",
+    "description": "Symfony bundle that turns a Google Shared Drive into a document workspace inside your app: browse folders, create/rename/move/delete Google Sheets & Docs, manage per-item sharing and filter visibility per user.",
+    "keywords": [
+        "symfony",
+        "bundle",
+        "google-drive",
+        "google-sheets",
+        "google-docs",
+        "oauth",
+        "shared-drive",
+        "permissions"
+    ],
+    "type": "symfony-bundle",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Yliy Shcherbak",
+            "email": "ylikscherbak@gmail.com"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "google/apiclient": "^2.15",
+        "symfony/config": "^6.0 || ^7.0",
+        "symfony/dependency-injection": "^6.0 || ^7.0",
+        "symfony/http-kernel": "^6.0 || ^7.0"
+    },
+    "require-dev": {
+        "symfony/console": "^6.0 || ^7.0"
+    },
+    "suggest": {
+        "symfony/console": "To run the one-off OAuth authorization command"
+    },
+    "autoload": {
+        "psr-4": {
+            "Borsche\\GoogleDriveDocsBundle\\": "src/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
