@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Optional PSR-6 caching of sharing lookups (`permission_cache.pool` / `permission_cache.ttl`),
   invalidated immediately when access is granted or revoked through the bundle
+- Compiler pass warning when the configured cache pool does not exist, instead of caching
+  silently doing nothing
 - Sharing with Google groups: `grantToGroup()` and a `$type` argument on `grant()`
 - Visibility filtering understands group grants via `ViewerContextInterface::getViewerGroups()`
 - PSR-14 events for every write operation (`DocumentCreatedEvent`, `FolderCreatedEvent`,

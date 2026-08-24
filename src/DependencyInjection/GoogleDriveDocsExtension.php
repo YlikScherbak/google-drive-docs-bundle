@@ -8,6 +8,7 @@ use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\Command\AuthorizeCommand;
 use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+use Borsche\GoogleDriveDocsBundle\DependencyInjection\Compiler\ValidateCachePoolPass;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Google\Client;
 use Google\Service\Drive;
@@ -61,6 +62,9 @@ class GoogleDriveDocsExtension extends Extension
                 : null,
             $config['permission_cache']['ttl'],
         ]);
+
+        // Checked after every bundle registered its services (see ValidateCachePoolPass).
+        $container->setParameter(ValidateCachePoolPass::POOL_PARAMETER, $config['permission_cache']['pool']);
         $service->setPublic(true);
         $container->setDefinition(DriveDocumentService::class, $service);
         $container->setAlias('google_drive_docs.service', DriveDocumentService::class)->setPublic(true);

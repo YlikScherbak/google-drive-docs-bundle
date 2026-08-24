@@ -314,6 +314,10 @@ Grants and revocations made through the bundle clear the affected entry immediat
 UI never shows stale access. Changes made **directly in Google** are picked up only after the
 TTL expires — keep it short if people also share from the Drive interface.
 
+Caching is entirely optional: with no pool configured the bundle simply queries Google every
+time. If the configured pool does not exist, the application still boots — you get a warning
+in the compiler log instead of a silent slowdown.
+
 ## Contributing
 
 ```bash
