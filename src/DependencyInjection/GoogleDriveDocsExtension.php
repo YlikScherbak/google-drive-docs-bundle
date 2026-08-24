@@ -13,6 +13,7 @@ use Google\Client;
 use Google\Service\Drive;
 use Symfony\Component\Config\FileLocator;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Reference;
 use Symfony\Component\HttpKernel\DependencyInjection\Extension;
@@ -54,6 +55,7 @@ class GoogleDriveDocsExtension extends Extension
             $config['shared_drive_id'],
             $config['document_mime_types'],
             $config['notify_on_share'],
+            new Reference('event_dispatcher', ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]);
         $service->setPublic(true);
         $container->setDefinition(DriveDocumentService::class, $service);

@@ -5,6 +5,13 @@ declare(strict_types=1);
 namespace Borsche\GoogleDriveDocsBundle\Service;
 
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+use Borsche\GoogleDriveDocsBundle\Event\AccessGrantedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\AccessRevokedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\DocumentCreatedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\DocumentDeletedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\DocumentMovedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\DocumentRenamedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\FolderCreatedEvent;
 use Borsche\GoogleDriveDocsBundle\Exception\AccessDeniedException;
 use Borsche\GoogleDriveDocsBundle\Exception\InheritedPermissionException;
 use Borsche\GoogleDriveDocsBundle\Exception\NotConfiguredException;
@@ -14,6 +21,7 @@ use Google\Service\Drive;
 use Google\Service\Drive\DriveFile;
 use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Exception as GoogleServiceException;
+use Psr\EventDispatcher\EventDispatcherInterface;
 
 /**
  * Document workspace on top of a Google Shared Drive.
@@ -50,6 +58,7 @@ class DriveDocumentService
         private readonly string $sharedDriveId,
         private readonly array $documentMimeTypes,
         private readonly bool $notifyOnShare = false,
+        private readonly ?EventDispatcherInterface $dispatcher = null,
     ) {
     }
 
@@ -118,22 +127,32 @@ class DriveDocumentService
      */
     public function createDocument(string $title, ?string $parentId = null, ?string $mimeType = null): DriveDocument
     {
-        return $this->createFile($title, $mimeType ?? $this->defaultDocumentMime(), $parentId);
+        $document = $this->createFile($title, $mimeType ?? $this->defaultDocumentMime(), $parentId);
+        $this->dispatch(new DocumentCreatedEvent($document, $parentId));
+
+        return $document;
     }
 
     public function createFolder(string $title, ?string $parentId = null): DriveDocument
     {
-        return $this->createFile($title, self::FOLDER_MIME, $parentId);
+        $folder = $this->createFile($title, self::FOLDER_MIME, $parentId);
+        $this->dispatch(new FolderCreatedEvent($folder, $parentId));
+
+        return $folder;
     }
 
     public function rename(string $fileId, string $title): DriveDocument
     {
         $this->assertAccess($fileId);
 
-        return $this->mapFile($this->drive->files->update($fileId, new DriveFile(['name' => $title]), [
+        $document = $this->mapFile($this->drive->files->update($fileId, new DriveFile(['name' => $title]), [
             'supportsAllDrives' => true,
             'fields'            => self::FILE_FIELDS,
         ]));
+
+        $this->dispatch(new DocumentRenamedEvent($document));
+
+        return $document;
     }
 
     /**
@@ -154,12 +173,18 @@ class DriveDocumentService
             'fields'            => 'parents',
         ]);
 
-        return $this->mapFile($this->drive->files->update($fileId, new DriveFile(), [
+        $previousParents = $current->getParents() ?? [];
+
+        $document = $this->mapFile($this->drive->files->update($fileId, new DriveFile(), [
             'addParents'        => $parentId ?: $this->sharedDriveId,
-            'removeParents'     => implode(',', $current->getParents() ?? []),
+            'removeParents'     => implode(',', $previousParents),
             'supportsAllDrives' => true,
             'fields'            => self::FILE_FIELDS,
         ]));
+
+        $this->dispatch(new DocumentMovedEvent($document, $previousParents[0] ?? null, $parentId));
+
+        return $document;
     }
 
     public function delete(string $fileId): void
@@ -167,6 +192,8 @@ class DriveDocumentService
         $this->assertAccess($fileId);
 
         $this->drive->files->delete($fileId, ['supportsAllDrives' => true]);
+
+        $this->dispatch(new DocumentDeletedEvent($fileId));
     }
 
     /**
@@ -221,7 +248,10 @@ class DriveDocumentService
 
         unset($this->grantCache[$fileId]);
 
-        return $this->mapPermission($created, $role, $email);
+        $permission = $this->mapPermission($created, $role, $email);
+        $this->dispatch(new AccessGrantedEvent($fileId, $permission));
+
+        return $permission;
     }
 
     public function revoke(string $fileId, string $permissionId): void
@@ -239,6 +269,8 @@ class DriveDocumentService
         }
 
         unset($this->grantCache[$fileId]);
+
+        $this->dispatch(new AccessRevokedEvent($fileId, $permissionId));
     }
 
     /**
@@ -492,6 +524,11 @@ class DriveDocumentService
                 implode(', ', self::ALLOWED_ROLES)
             ));
         }
+    }
+
+    private function dispatch(object $event): void
+    {
+        $this->dispatcher?->dispatch($event);
     }
 
     private function assertConfigured(): void

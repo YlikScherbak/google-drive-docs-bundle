@@ -28,6 +28,7 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Per-user visibility**: users only see the items shared with them; administrators see everything
 - **Inheritance-aware**: sharing a folder cascades to its whole subtree, and inherited permissions are flagged so your UI can hide a "remove" button that Google would reject
 - **OAuth-based auth** — works on organisations where service-account keys are disabled by policy
+- **PSR-14 events** on every write, so auditing and notifications stay in your application
 
 ## Requirements
 
@@ -176,6 +177,46 @@ With that in place:
 - opening or modifying anything else throws `AccessDeniedException` (map it to HTTP 403).
 
 A typical layout is one folder per team or country: share `Portugal` with the Portuguese team and they see that folder and everything inside it — and nothing else.
+
+## Events
+
+Every write operation dispatches a PSR-14 event, so auditing, notifications or cache
+invalidation live in your application instead of in the bundle:
+
+| Event | Dispatched when | Carries |
+|---|---|---|
+| `DocumentCreatedEvent` | a document is created | `document`, `parentId` |
+| `FolderCreatedEvent` | a folder is created | `folder`, `parentId` |
+| `DocumentRenamedEvent` | an item is renamed | `document` |
+| `DocumentMovedEvent` | an item is moved | `document`, `fromParentId`, `toParentId` |
+| `DocumentDeletedEvent` | an item is trashed | `fileId` |
+| `AccessGrantedEvent` | access is granted | `fileId`, `permission` |
+| `AccessRevokedEvent` | access is revoked | `fileId`, `permissionId` |
+
+All of them extend `DriveEvent` and expose `fileId`. Read operations dispatch nothing.
+
+```php
+use Borsche\GoogleDriveDocsBundle\Event\AccessGrantedEvent;
+use Symfony\Component\EventDispatcher\Attribute\AsEventListener;
+
+#[AsEventListener]
+final class AuditDriveActivity
+{
+    public function __construct(private readonly LoggerInterface $auditLog) {}
+
+    public function __invoke(AccessGrantedEvent $event): void
+    {
+        $this->auditLog->info('drive.access_granted', [
+            'file'  => $event->fileId,
+            'email' => $event->permission->emailAddress,
+            'role'  => $event->permission->role,
+        ]);
+    }
+}
+```
+
+The dispatcher is optional: without one (or when the bundle is used outside Symfony)
+the service simply skips dispatching.
 
 ## Example controller
 
