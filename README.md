@@ -1,5 +1,10 @@
 # Google Drive Docs Bundle
 
+[![CI](https://github.com/YlikScherbak/google-drive-docs-bundle/actions/workflows/ci.yml/badge.svg)](https://github.com/YlikScherbak/google-drive-docs-bundle/actions/workflows/ci.yml)
+[![PHP](https://img.shields.io/badge/php-8.1%2B-777bb4.svg)](https://www.php.net/)
+[![Symfony](https://img.shields.io/badge/symfony-6.x%20%7C%207.x-000000.svg)](https://symfony.com/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 A Symfony bundle that turns a **Google Shared Drive into a document workspace inside your own application**.
 
 Your users browse folders, create and edit real Google Sheets/Docs, and manage who has access — without ever leaving your UI. The documents themselves stay in Google, so formulas, formatting, charts and real-time collaboration keep working exactly as users expect.
@@ -224,6 +229,14 @@ Map the bundle exceptions to HTTP codes that fit your API:
 ## Performance note
 
 When visibility filtering is active, access checks fall back to `permissions.list` per item, because Shared Drives usually omit the `permissions` field from `files.list`. That is one extra API call per root-level item; for large drives consider caching the result per user.
+
+## Contributing
+
+```bash
+composer install
+composer test      # PHPUnit
+composer phpstan   # static analysis
+```
 
 ## License
 

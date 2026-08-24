@@ -1,0 +1,26 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Borsche\GoogleDriveDocsBundle\Tests;
+
+use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+
+final class FakeViewerContext implements ViewerContextInterface
+{
+    public function __construct(
+        private readonly ?string $email,
+        private readonly bool $seesEverything = false,
+    ) {
+    }
+
+    public function getViewerEmail(): ?string
+    {
+        return $this->email;
+    }
+
+    public function seesEverything(): bool
+    {
+        return $this->seesEverything;
+    }
+}

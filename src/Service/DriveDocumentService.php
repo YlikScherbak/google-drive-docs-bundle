@@ -34,7 +34,11 @@ class DriveDocumentService
 
     private const FILE_FIELDS = 'id,name,mimeType,webViewLink,modifiedTime';
 
-    /** Per-request cache of direct grants: fileId => [email, ...] */
+    /**
+     * Per-request cache of direct grants: fileId => list of e-mails.
+     *
+     * @var array<string, string[]>
+     */
     private array $grantCache = [];
 
     /**
