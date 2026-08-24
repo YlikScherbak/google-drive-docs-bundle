@@ -24,7 +24,7 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Navigate** into folders (any depth) and **search** by name across the whole drive
 - **Create / rename / move / delete** documents and folders
 - **Embed the native Google editor** via the `webViewLink` of each document
-- **Manage sharing**: list, grant and revoke access per file or folder (`reader` / `commenter` / `writer`)
+- **Manage sharing**: list, grant and revoke access per file or folder (`reader` / `commenter` / `writer`), for individual users or **Google groups**
 - **Per-user visibility**: users only see the items shared with them; administrators see everything
 - **Inheritance-aware**: sharing a folder cascades to its whole subtree, and inherited permissions are flagged so your UI can hide a "remove" button that Google would reject
 - **OAuth-based auth** — works on organisations where service-account keys are disabled by policy
@@ -132,6 +132,7 @@ $this->drive->delete($doc->id);
 // Sharing
 $permissions = $this->drive->listPermissions($doc->id);
 $this->drive->grant($folder->id, 'user@example.com', 'writer');
+$this->drive->grantToGroup($folder->id, 'portugal@example.com', 'writer'); // whole team at once
 $this->drive->revoke($doc->id, $permissionId);
 
 // Embed in your UI
@@ -161,6 +162,16 @@ final class AppViewerContext implements ViewerContextInterface
     {
         return $this->security->isGranted('ROLE_ADMIN');
     }
+
+    /**
+     * Google groups the user belongs to. Return [] if you share with individuals only.
+     *
+     * @return string[]
+     */
+    public function getViewerGroups(): array
+    {
+        return $this->security->getUser()?->getGoogleGroups() ?? [];
+    }
 }
 ```
 
@@ -177,6 +188,19 @@ With that in place:
 - opening or modifying anything else throws `AccessDeniedException` (map it to HTTP 403).
 
 A typical layout is one folder per team or country: share `Portugal` with the Portuguese team and they see that folder and everything inside it — and nothing else.
+
+### Sharing with groups
+
+Granting access to a Google group is usually easier than listing people one by one: membership
+is then managed in Google, not in your application.
+
+```php
+$this->drive->grantToGroup($portugalFolder->id, 'portugal@example.com');
+```
+
+Google does not expose group membership through the Drive API, so the bundle asks your
+application instead: return the user's group addresses from `getViewerGroups()` and items
+shared with any of those groups become visible to them.
 
 ## Events
 

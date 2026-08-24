@@ -21,4 +21,12 @@ final class AllowAllViewerContext implements ViewerContextInterface
     {
         return true;
     }
+
+    /**
+     * @return string[]
+     */
+    public function getViewerGroups(): array
+    {
+        return [];
+    }
 }

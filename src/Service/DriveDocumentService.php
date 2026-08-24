@@ -40,6 +40,11 @@ class DriveDocumentService
         DrivePermission::ROLE_WRITER,
     ];
 
+    private const ALLOWED_TYPES = [
+        DrivePermission::TYPE_USER,
+        DrivePermission::TYPE_GROUP,
+    ];
+
     private const FILE_FIELDS = 'id,name,mimeType,webViewLink,modifiedTime';
 
     /**
@@ -232,12 +237,17 @@ class DriveDocumentService
     /**
      * Share a file or folder with a Google account. Sharing a folder cascades to everything inside.
      */
-    public function grant(string $fileId, string $email, string $role = DrivePermission::ROLE_WRITER): DrivePermission
-    {
+    public function grant(
+        string $fileId,
+        string $email,
+        string $role = DrivePermission::ROLE_WRITER,
+        string $type = DrivePermission::TYPE_USER
+    ): DrivePermission {
         $this->assertRole($role);
+        $this->assertType($type);
 
         $created = $this->drive->permissions->create($fileId, new GooglePermission([
-            'type'         => 'user',
+            'type'         => $type,
             'role'         => $role,
             'emailAddress' => $email,
         ]), [
@@ -248,10 +258,21 @@ class DriveDocumentService
 
         unset($this->grantCache[$fileId]);
 
-        $permission = $this->mapPermission($created, $role, $email);
+        $permission = $this->mapPermission($created, $role, $email, $type);
         $this->dispatch(new AccessGrantedEvent($fileId, $permission));
 
         return $permission;
+    }
+
+    /**
+     * Share with a Google group — the usual way to give a whole team access at once.
+     */
+    public function grantToGroup(
+        string $fileId,
+        string $groupEmail,
+        string $role = DrivePermission::ROLE_WRITER
+    ): DrivePermission {
+        return $this->grant($fileId, $groupEmail, $role, DrivePermission::TYPE_GROUP);
     }
 
     public function revoke(string $fileId, string $permissionId): void
@@ -282,9 +303,11 @@ class DriveDocumentService
             return true;
         }
 
-        $email = $email ?? $this->viewerContext->getViewerEmail();
+        $identities = $email !== null && $email !== ''
+            ? [$this->normalizeEmail($email)]
+            : $this->viewerIdentities();
 
-        if ($email === null || $email === '') {
+        if ($identities === []) {
             return false;
         }
 
@@ -301,7 +324,7 @@ class DriveDocumentService
                 return false;
             }
 
-            if ($this->isGrantedTo($file, $email)) {
+            if ($this->isGrantedTo($file, $identities)) {
                 return true;
             }
 
@@ -326,9 +349,9 @@ class DriveDocumentService
      */
     private function query(string $q, bool $filter): array
     {
-        $viewerEmail = $filter ? $this->viewerContext->getViewerEmail() : null;
+        $identities = $filter ? $this->viewerIdentities() : [];
 
-        if ($filter && ($viewerEmail === null || $viewerEmail === '')) {
+        if ($filter && $identities === []) {
             return [];
         }
 
@@ -354,7 +377,7 @@ class DriveDocumentService
             $response = $this->drive->files->listFiles($params);
 
             foreach ($response->getFiles() as $file) {
-                if ($filter && !$this->isGrantedTo($file, $viewerEmail)) {
+                if ($filter && !$this->isGrantedTo($file, $identities)) {
                     continue;
                 }
 
@@ -417,7 +440,8 @@ class DriveDocumentService
                 $response = $this->drive->permissions->listPermissions($fileId, $params);
 
                 foreach ($response->getPermissions() as $permission) {
-                    if ($permission->getType() === 'user' && $permission->getEmailAddress()) {
+                    if (in_array($permission->getType(), self::ALLOWED_TYPES, true)
+                        && $permission->getEmailAddress()) {
                         $emails[] = $this->normalizeEmail($permission->getEmailAddress());
                     }
                 }
@@ -431,22 +455,46 @@ class DriveDocumentService
         return $this->grantCache[$fileId] = $emails;
     }
 
-    private function isGrantedTo(DriveFile $file, ?string $email): bool
+    /**
+     * @param string[] $identities normalised e-mail plus the viewer group addresses
+     */
+    private function isGrantedTo(DriveFile $file, array $identities): bool
     {
-        if ($email === null || $email === '') {
+        if ($identities === []) {
             return false;
         }
 
-        $needle = $this->normalizeEmail($email);
-
         foreach ($file->getPermissions() ?? [] as $permission) {
-            if ($permission->getType() === 'user'
-                && $this->normalizeEmail((string) $permission->getEmailAddress()) === $needle) {
+            if (in_array($permission->getType(), self::ALLOWED_TYPES, true)
+                && in_array($this->normalizeEmail((string) $permission->getEmailAddress()), $identities, true)) {
                 return true;
             }
         }
 
-        return in_array($needle, $this->directGrantEmails($file->getId()), true);
+        return array_intersect($identities, $this->directGrantEmails($file->getId())) !== [];
+    }
+
+    /**
+     * Everything the current viewer can be addressed by: own e-mail and group addresses.
+     *
+     * @return string[]
+     */
+    private function viewerIdentities(): array
+    {
+        $identities = [];
+        $email      = $this->viewerContext->getViewerEmail();
+
+        if ($email !== null && $email !== '') {
+            $identities[] = $this->normalizeEmail($email);
+        }
+
+        foreach ($this->viewerContext->getViewerGroups() as $group) {
+            if ($group !== '') {
+                $identities[] = $this->normalizeEmail($group);
+            }
+        }
+
+        return array_values(array_unique($identities));
     }
 
     /** Lower-case and collapse Gmail "+tag" aliases (Google treats them as the same account). */
@@ -478,7 +526,8 @@ class DriveDocumentService
     private function mapPermission(
         GooglePermission $permission,
         ?string $fallbackRole = null,
-        ?string $fallbackEmail = null
+        ?string $fallbackEmail = null,
+        ?string $fallbackType = null
     ): DrivePermission {
         $inherited     = false;
         $inheritedFrom = null;
@@ -495,7 +544,7 @@ class DriveDocumentService
             $permission->getId(),
             $permission->getEmailAddress() ?? $fallbackEmail,
             $permission->getRole() ?? $fallbackRole,
-            $permission->getType() ?? ($fallbackEmail !== null ? 'user' : null),
+            $permission->getType() ?? $fallbackType ?? ($fallbackEmail !== null ? DrivePermission::TYPE_USER : null),
             $permission->getDisplayName(),
             $inherited,
             $inheritedFrom,
@@ -529,6 +578,17 @@ class DriveDocumentService
     private function dispatch(object $event): void
     {
         $this->dispatcher?->dispatch($event);
+    }
+
+    private function assertType(string $type): void
+    {
+        if (!in_array($type, self::ALLOWED_TYPES, true)) {
+            throw new \InvalidArgumentException(sprintf(
+                'Unsupported grantee type "%s". Allowed: %s.',
+                $type,
+                implode(', ', self::ALLOWED_TYPES)
+            ));
+        }
     }
 
     private function assertConfigured(): void

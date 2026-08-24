@@ -8,9 +8,13 @@ use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 
 final class FakeViewerContext implements ViewerContextInterface
 {
+    /**
+     * @param string[] $groups
+     */
     public function __construct(
         private readonly ?string $email,
         private readonly bool $seesEverything = false,
+        private readonly array $groups = [],
     ) {
     }
 
@@ -22,5 +26,13 @@ final class FakeViewerContext implements ViewerContextInterface
     public function seesEverything(): bool
     {
         return $this->seesEverything;
+    }
+
+    /**
+     * @return string[]
+     */
+    public function getViewerGroups(): array
+    {
+        return $this->groups;
     }
 }

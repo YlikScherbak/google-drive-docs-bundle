@@ -9,6 +9,9 @@ namespace Borsche\GoogleDriveDocsBundle\Model;
  */
 final class DrivePermission
 {
+    public const TYPE_USER  = 'user';
+    public const TYPE_GROUP = 'group';
+
     public const ROLE_READER    = 'reader';
     public const ROLE_COMMENTER = 'commenter';
     public const ROLE_WRITER    = 'writer';

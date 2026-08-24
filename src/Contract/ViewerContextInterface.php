@@ -25,4 +25,15 @@ interface ViewerContextInterface
      * (typically administrators or users allowed to manage sharing).
      */
     public function seesEverything(): bool;
+
+    /**
+     * Google group addresses the viewer belongs to (e.g. "portugal@example.com").
+     *
+     * Sharing a folder with a group is the usual way to give a whole team access;
+     * the bundle cannot read group membership from Google, so the application
+     * supplies it here. Return an empty array when groups are not used.
+     *
+     * @return string[]
+     */
+    public function getViewerGroups(): array;
 }
