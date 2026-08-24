@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Sharing with Google groups: `grantToGroup()` and a `$type` argument on `grant()`
+- Visibility filtering understands group grants via `ViewerContextInterface::getViewerGroups()`
 - PSR-14 events for every write operation (`DocumentCreatedEvent`, `FolderCreatedEvent`,
   `DocumentRenamedEvent`, `DocumentMovedEvent`, `DocumentDeletedEvent`, `AccessGrantedEvent`,
   `AccessRevokedEvent`) so auditing and notifications can live outside the bundle
 - Test suite (PHPUnit) covering visibility filtering, parent-chain access checks,
   sharing behaviour, folder/document creation and configuration handling
 - Continuous integration on GitHub Actions (PHP 8.1–8.3 × Symfony 6.4/7) and PHPStan analysis
+
+### Changed
+- `ViewerContextInterface` gained `getViewerGroups(): array`. Implementations must add it;
+  return an empty array when sharing with groups is not used.
 
 ## [0.1.0] - 2026-08-24
 
