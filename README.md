@@ -105,6 +105,12 @@ google_drive_docs:
         # - 'application/vnd.google-apps.document'
         # - 'application/vnd.google-apps.presentation'
 
+    # Optional. Caches sharing lookups used by visibility filtering.
+    # Null pool disables caching entirely.
+    permission_cache:
+        pool: 'cache.app'
+        ttl: 300
+
     # Optional. Send Google notification e-mails when granting access.
     # Required if you share with addresses that have no Google account.
     notify_on_share: false
@@ -291,9 +297,22 @@ Map the bundle exceptions to HTTP codes that fit your API:
 - **Editing happens under the viewer's own Google session.** Anyone who should edit a document needs a Google account that has been granted access to it.
 - **Visibility filtering is application-level.** If your users are members of the Shared Drive itself, Google grants them access to everything regardless of what your UI shows. For real isolation, do not add users as drive members — share individual folders instead.
 
-## Performance note
+## Performance
 
-When visibility filtering is active, access checks fall back to `permissions.list` per item, because Shared Drives usually omit the `permissions` field from `files.list`. That is one extra API call per root-level item; for large drives consider caching the result per user.
+When visibility filtering is active the bundle asks Google for the sharing of every listed
+item, because Shared Drives usually omit the `permissions` field from `files.list`. Point
+`permission_cache.pool` at a PSR-6 pool to keep those lookups off the hot path:
+
+```yaml
+google_drive_docs:
+    permission_cache:
+        pool: 'cache.app'
+        ttl: 300
+```
+
+Grants and revocations made through the bundle clear the affected entry immediately, so the
+UI never shows stale access. Changes made **directly in Google** are picked up only after the
+TTL expires — keep it short if people also share from the Drive interface.
 
 ## Contributing
 

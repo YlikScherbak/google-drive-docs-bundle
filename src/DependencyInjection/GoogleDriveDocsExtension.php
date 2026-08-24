@@ -56,6 +56,10 @@ class GoogleDriveDocsExtension extends Extension
             $config['document_mime_types'],
             $config['notify_on_share'],
             new Reference('event_dispatcher', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+            $config['permission_cache']['pool'] !== null
+                ? new Reference($config['permission_cache']['pool'], ContainerInterface::NULL_ON_INVALID_REFERENCE)
+                : null,
+            $config['permission_cache']['ttl'],
         ]);
         $service->setPublic(true);
         $container->setDefinition(DriveDocumentService::class, $service);

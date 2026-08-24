@@ -21,6 +21,7 @@ use Google\Service\Drive;
 use Google\Service\Drive\DriveFile;
 use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Exception as GoogleServiceException;
+use Psr\Cache\CacheItemPoolInterface;
 use Psr\EventDispatcher\EventDispatcherInterface;
 
 /**
@@ -64,6 +65,8 @@ class DriveDocumentService
         private readonly array $documentMimeTypes,
         private readonly bool $notifyOnShare = false,
         private readonly ?EventDispatcherInterface $dispatcher = null,
+        private readonly ?CacheItemPoolInterface $permissionCache = null,
+        private readonly int $permissionCacheTtl = 300,
     ) {
     }
 
@@ -256,7 +259,7 @@ class DriveDocumentService
             'fields'                => 'id,emailAddress,role,type,displayName',
         ]);
 
-        unset($this->grantCache[$fileId]);
+        $this->forgetGrants($fileId);
 
         $permission = $this->mapPermission($created, $role, $email, $type);
         $this->dispatch(new AccessGrantedEvent($fileId, $permission));
@@ -289,7 +292,7 @@ class DriveDocumentService
             throw $e;
         }
 
-        unset($this->grantCache[$fileId]);
+        $this->forgetGrants($fileId);
 
         $this->dispatch(new AccessRevokedEvent($fileId, $permissionId));
     }
@@ -422,6 +425,15 @@ class DriveDocumentService
             return $this->grantCache[$fileId];
         }
 
+        $item = $this->permissionCache?->getItem($this->cacheKey($fileId));
+
+        if ($item !== null && $item->isHit()) {
+            /** @var string[] $cached */
+            $cached = $item->get();
+
+            return $this->grantCache[$fileId] = $cached;
+        }
+
         $emails    = [];
         $pageToken = null;
 
@@ -449,7 +461,19 @@ class DriveDocumentService
                 $pageToken = $response->getNextPageToken();
             } while ($pageToken !== null);
         } catch (\Throwable) {
+            // Do not cache failures: a transient API error must not hide documents
+            // for the whole TTL.
             return $this->grantCache[$fileId] = [];
+        }
+
+        if ($item !== null) {
+            $item->set($emails);
+
+            if ($this->permissionCacheTtl > 0) {
+                $item->expiresAfter($this->permissionCacheTtl);
+            }
+
+            $this->permissionCache?->save($item);
         }
 
         return $this->grantCache[$fileId] = $emails;
@@ -573,6 +597,25 @@ class DriveDocumentService
                 implode(', ', self::ALLOWED_ROLES)
             ));
         }
+    }
+
+    /**
+     * Drops the cached sharing of an item after it changed.
+     *
+     * Only the item itself needs clearing: access checks walk the parent chain and
+     * read each ancestor's own entry, so a grant on a folder is picked up by its children.
+     */
+    private function forgetGrants(string $fileId): void
+    {
+        unset($this->grantCache[$fileId]);
+
+        $this->permissionCache?->deleteItem($this->cacheKey($fileId));
+    }
+
+    private function cacheKey(string $fileId): string
+    {
+        // PSR-6 keys allow a limited character set; Google file ids do not fit it.
+        return 'google_drive_docs.grants.' . sha1($fileId);
     }
 
     private function dispatch(object $event): void
