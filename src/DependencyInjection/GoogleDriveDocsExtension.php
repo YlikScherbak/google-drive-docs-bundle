@@ -10,8 +10,10 @@ use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 use Borsche\GoogleDriveDocsBundle\DependencyInjection\Compiler\ValidateCachePoolPass;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
+use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
 use Google\Client;
 use Google\Service\Drive;
+use Google\Service\Sheets;
 use Symfony\Component\Config\FileLocator;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -71,6 +73,21 @@ class GoogleDriveDocsExtension extends Extension
         $service->setPublic(true);
         $container->setDefinition(DriveDocumentService::class, $service);
         $container->setAlias('google_drive_docs.service', DriveDocumentService::class)->setPublic(true);
+
+        // Sheets service, on the same client so retries and backoff carry over
+        $sheets = new Definition(Sheets::class, [new Reference('google_drive_docs.client')]);
+        $sheets->setPublic(false);
+        $container->setDefinition('google_drive_docs.sheets', $sheets);
+
+        // Spreadsheet contents. Access decisions stay with DriveDocumentService.
+        $spreadsheets = new Definition(SpreadsheetService::class, [
+            new Reference('google_drive_docs.sheets'),
+            new Reference(DriveDocumentService::class),
+            new Reference('event_dispatcher', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+        ]);
+        $spreadsheets->setPublic(true);
+        $container->setDefinition(SpreadsheetService::class, $spreadsheets);
+        $container->setAlias('google_drive_docs.spreadsheets', SpreadsheetService::class)->setPublic(true);
 
         // Console command (optional)
         if (class_exists(\Symfony\Component\Console\Command\Command::class)) {

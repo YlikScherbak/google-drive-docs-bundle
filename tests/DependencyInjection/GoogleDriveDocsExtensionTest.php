@@ -8,6 +8,7 @@ use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 use Borsche\GoogleDriveDocsBundle\DependencyInjection\GoogleDriveDocsExtension;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
+use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
@@ -46,6 +47,27 @@ final class GoogleDriveDocsExtensionTest extends TestCase
         self::assertSame('my-drive', $arguments[2]);
         self::assertSame(['application/vnd.google-apps.document'], $arguments[3]);
         self::assertTrue($arguments[4]);
+    }
+
+    public function testItRegistersTheSpreadsheetService(): void
+    {
+        $container = new ContainerBuilder();
+
+        (new GoogleDriveDocsExtension())->load([['shared_drive_id' => 'drive']], $container);
+
+        self::assertTrue($container->hasDefinition(SpreadsheetService::class));
+        self::assertTrue($container->hasDefinition('google_drive_docs.sheets'));
+        self::assertTrue($container->hasAlias('google_drive_docs.spreadsheets'));
+        // Reachable without autowiring, like DriveDocumentService.
+        self::assertTrue($container->getDefinition(SpreadsheetService::class)->isPublic());
+        self::assertTrue($container->getAlias('google_drive_docs.spreadsheets')->isPublic());
+        self::assertFalse($container->getDefinition('google_drive_docs.sheets')->isPublic());
+
+        $arguments = $container->getDefinition(SpreadsheetService::class)->getArguments();
+
+        // Same authenticated client as Drive, so retries and backoff carry over.
+        self::assertSame('google_drive_docs.sheets', (string) $arguments[0]);
+        self::assertSame(DriveDocumentService::class, (string) $arguments[1]);
     }
 
     public function testRetrySettingsReachTheClientFactory(): void
