@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-25
+
 ### Added
 - `SpreadsheetService` reads and writes the cells of a Google Sheet, so a template can be
   filled with the application's own data: `listTabs()`, `read()`, `readMany()`, `write()`,
@@ -199,7 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.1.0...v0.2.0
