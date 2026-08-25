@@ -6,6 +6,7 @@ namespace Borsche\GoogleDriveDocsBundle\Tests\Service;
 
 use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+use Borsche\GoogleDriveDocsBundle\Exception\UnexpectedDriveStateException;
 use Borsche\GoogleDriveDocsBundle\Model\DriveDocument;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
@@ -132,7 +133,7 @@ final class DriveDocumentServicePaginationTest extends TestCase
     {
         $this->files->method('listFiles')->willReturn($this->fileList([$this->file('doc', 'Doc')], 'AGAIN'));
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(UnexpectedDriveStateException::class);
 
         $this->service()->listFolder();
     }

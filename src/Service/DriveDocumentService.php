@@ -21,6 +21,7 @@ use Borsche\GoogleDriveDocsBundle\Exception\InheritedPermissionException;
 use Borsche\GoogleDriveDocsBundle\Exception\InsufficientDriveRoleException;
 use Borsche\GoogleDriveDocsBundle\Exception\NotConfiguredException;
 use Borsche\GoogleDriveDocsBundle\Exception\NotCopyableException;
+use Borsche\GoogleDriveDocsBundle\Exception\UnexpectedDriveStateException;
 use Borsche\GoogleDriveDocsBundle\Exception\UploadTooLargeException;
 use Borsche\GoogleDriveDocsBundle\Model\DriveCapabilities;
 use Borsche\GoogleDriveDocsBundle\Model\DriveDocument;
@@ -453,7 +454,7 @@ class DriveDocumentService
         $previousParents = $current->getParents() ?? [];
 
         if ($previousParents === []) {
-            throw new \RuntimeException(sprintf(
+            throw new UnexpectedDriveStateException(sprintf(
                 'Google did not report the current parent of "%s", so it cannot be moved safely.',
                 $fileId
             ));
@@ -615,10 +616,20 @@ class DriveDocumentService
         string $role = DrivePermission::ROLE_WRITER,
         string $type = DrivePermission::TYPE_USER
     ): DrivePermission {
+        // Local validation first: a bad role must not cost a walk up the parent chain.
         $this->assertRole($role);
         $this->assertType($type);
         $this->assertAccess($fileId);
 
+        return $this->share($fileId, $email, $role, $type);
+    }
+
+    /**
+     * The sharing call itself, on already validated input. Callers decide whether the
+     * viewer's access had to be proven first.
+     */
+    private function share(string $fileId, string $email, string $role, string $type): DrivePermission
+    {
         $created = $this->drive->permissions->create($fileId, new GooglePermission([
             'type'         => $type,
             'role'         => $role,
@@ -635,6 +646,39 @@ class DriveDocumentService
         $this->dispatch(new AccessGrantedEvent($fileId, $permission));
 
         return $permission;
+    }
+
+    /**
+     * Share on behalf of the application, skipping the viewer's access check.
+     *
+     * `grant()` refuses to touch an item the current viewer cannot reach, which is what stops
+     * anyone holding a file id from sharing a stranger's document with themselves. That check
+     * gets in the way of the one case where the **application**, not the viewer, is acting:
+     * a document the service user has just created is shared with nobody, so the grant that
+     * gives the creator access is itself a grant on an item the creator cannot yet see.
+     *
+     *     public function onCreated(DocumentCreatedEvent $event): void
+     *     {
+     *         if (!$this->viewerContext->seesEverything()) {
+     *             $this->drive->grantAsService($event->fileId, $this->creatorEmail(), 'writer');
+     *         }
+     *     }
+     *
+     * Reach for it only where the decision to share is the application's own and already
+     * authorised by something else — never with a file id that came from a request. It is a
+     * separate method rather than a flag on `grant()` so that every place bypassing the check
+     * can be found with a single grep.
+     */
+    public function grantAsService(
+        string $fileId,
+        string $email,
+        string $role = DrivePermission::ROLE_WRITER,
+        string $type = DrivePermission::TYPE_USER
+    ): DrivePermission {
+        $this->assertRole($role);
+        $this->assertType($type);
+
+        return $this->share($fileId, $email, $role, $type);
     }
 
     /**
@@ -1234,7 +1278,7 @@ class DriveDocumentService
     private function assertPageBudget(int $pages, string $call): void
     {
         if ($pages > self::MAX_PAGES) {
-            throw new \RuntimeException(sprintf(
+            throw new UnexpectedDriveStateException(sprintf(
                 'Google kept returning a nextPageToken for %s beyond %d pages; giving up on what looks like a runaway listing.',
                 $call,
                 self::MAX_PAGES

@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   eventually running out of memory — on a `nextPageToken` that never ends
 
 ### Added
+- `grantAsService()` shares on behalf of the application, skipping the viewer's access check
+  that `grant()` performs. Without it the access check above has no answer for the
+  "creator gets access" pattern: a document the service user just created in the drive root is
+  shared with nobody, so the grant meant to give its creator access is itself a grant on an
+  item that creator cannot yet reach. Role and grantee type are still validated, the event is
+  still dispatched and the cached sharing is still invalidated. A separate method rather than a
+  flag on `grant()`, so every bypass is one grep away (#1)
+- `UnexpectedDriveStateException` for the two cases where Google answers something that cannot
+  be true — an item on a Shared Drive with no parent, and a listing whose `nextPageToken` never
+  ends. Both previously raised a bare `RuntimeException`, which slipped through the typed
+  catches consumers map onto status codes and surfaced as an untyped 500 (#2)
 - A compiler pass that leaves a note in the container's compiler log while
   `ViewerContextInterface` is still the default `AllowAllViewerContext`, so running without
   visibility filtering is always a choice, never an oversight

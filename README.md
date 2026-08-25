@@ -182,12 +182,46 @@ $permissions = $this->drive->listPermissions($doc->id);
 $this->drive->grant($folder->id, 'user@example.com', 'writer');
 $this->drive->grantToGroup($folder->id, 'portugal@example.com', 'writer'); // whole team at once
 $this->drive->revoke($doc->id, $permissionId);
+$this->drive->grantAsService($doc->id, $email, 'writer');  // the application acting, not the viewer
 
 // Embed in your UI
 echo $doc->webViewLink; // https://docs.google.com/spreadsheets/d/<id>/edit
 ```
 
 Every item is returned as a `DriveDocument` (`id`, `name`, `mimeType`, `webViewLink`, `modifiedTime`, `type`, `trashed`, `createdTime`, `size`, `iconLink`, `thumbnailLink`, `lastModifiedBy`, `capabilities`) and every sharing entry as a `DrivePermission` (`id`, `emailAddress`, `role`, `type`, `displayName`, `inherited`, `inheritedFrom`). Both expose `toArray()` for JSON responses.
+
+## Giving the creator access
+
+Documents are created by the **service user** the bundle authenticates as, not by the person who
+clicked the button. With visibility filtering on, a freshly created document is therefore shared
+with nobody:
+
+- created **inside a folder the user already reaches** — they see it, through the folder's
+  inherited sharing. Nothing to do.
+- created in the **root of the Shared Drive** — no ancestor carries a grant, so the creator
+  cannot see what they just made.
+
+For the second case the application has to share the item itself. That grant is a special one:
+the item is not yet reachable by the creator, so `grant()` — which insists the current viewer
+can reach the item — would refuse the very call meant to fix that. Use `grantAsService()`:
+
+```php
+#[AsEventListener]
+public function onCreated(DocumentCreatedEvent $event): void
+{
+    if ($this->viewerContext->seesEverything()) {
+        return; // administrators already see the whole drive
+    }
+
+    $this->drive->grantAsService($event->fileId, $this->creatorEmail(), 'writer');
+}
+```
+
+`grantAsService()` skips the viewer check and nothing else — role and grantee type are still
+validated, the event is still dispatched, the cached sharing is still invalidated. Use it only
+where the decision to share is the application's own and already authorised by something else;
+never with a file id taken straight from a request. It is a separate method rather than a flag on
+`grant()` precisely so that every bypass can be found with one grep.
 
 ## Per-user visibility
 
@@ -335,6 +369,7 @@ Map the bundle exceptions to HTTP codes that fit your API:
 | `NotCopyableException` | 400 |
 | `UploadTooLargeException` | 413 |
 | `InsufficientDriveRoleException` | 500 — it is a setup problem, log it for an administrator |
+| `UnexpectedDriveStateException` | 500 — an API fault, not input; log it |
 | `NotConfiguredException` | 503 |
 | `Google\Service\Exception` | pass the Google status through |
 

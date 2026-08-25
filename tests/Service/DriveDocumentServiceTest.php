@@ -9,6 +9,7 @@ use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 use Borsche\GoogleDriveDocsBundle\Exception\AccessDeniedException;
 use Borsche\GoogleDriveDocsBundle\Exception\InheritedPermissionException;
 use Borsche\GoogleDriveDocsBundle\Exception\NotConfiguredException;
+use Borsche\GoogleDriveDocsBundle\Exception\UnexpectedDriveStateException;
 use Borsche\GoogleDriveDocsBundle\Model\DriveDocument;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Tests\FakeViewerContext;
@@ -398,6 +399,64 @@ final class DriveDocumentServiceTest extends TestCase
         $this->service(new FakeViewerContext('viewer@example.com'))->grant('doc', 'viewer@example.com', 'writer');
     }
 
+    public function testGrantAsServiceReachesAnItemTheViewerCannotSeeYet(): void
+    {
+        // The "creator gets access" case: the service user just created the document in the
+        // drive root, so nobody is on it yet and the viewer check would refuse the very grant
+        // meant to give the creator access.
+        $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, [self::DRIVE_ID]));
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([]));
+        $this->permissions->expects(self::once())->method('create')->willReturn(
+            new GooglePermission([
+                'id'           => 'perm-1',
+                'emailAddress' => 'viewer@example.com',
+                'role'         => 'writer',
+                'type'         => 'user',
+            ])
+        );
+
+        $permission = $this->service(new FakeViewerContext('viewer@example.com'))
+            ->grantAsService('doc', 'viewer@example.com', 'writer');
+
+        self::assertSame('perm-1', $permission->id);
+        self::assertSame('writer', $permission->role);
+    }
+
+    public function testGrantAsServiceNeverAsksWhoTheViewerIs(): void
+    {
+        // No access walk at all: the application is acting, not the viewer.
+        $this->files->expects(self::never())->method('get');
+        $this->permissions->method('create')->willReturn(new GooglePermission(['id' => 'perm-1']));
+
+        $this->service(new FakeViewerContext('viewer@example.com'))
+            ->grantAsService('doc', 'someone@example.com', 'reader');
+    }
+
+    public function testGrantAsServiceStillValidatesTheRole(): void
+    {
+        $this->permissions->expects(self::never())->method('create');
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->service()->grantAsService('doc', 'user@example.com', 'owner');
+    }
+
+    public function testGrantAsServiceCanShareWithAGroup(): void
+    {
+        $captured = null;
+        $this->permissions->method('create')->willReturnCallback(
+            function (string $id, GooglePermission $permission) use (&$captured): GooglePermission {
+                $captured = $permission;
+
+                return new GooglePermission(['id' => 'perm-1']);
+            }
+        );
+
+        $this->service()->grantAsService('doc', 'team@example.com', 'writer', 'group');
+
+        self::assertSame('group', $captured->getType());
+    }
+
     public function testRevokeOnAForeignItemIsDenied(): void
     {
         $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, [self::DRIVE_ID]));
@@ -451,7 +510,7 @@ final class DriveDocumentServiceTest extends TestCase
         $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, []));
         $this->files->expects(self::never())->method('update');
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(UnexpectedDriveStateException::class);
 
         $this->service()->move('doc', 'new-parent');
     }
@@ -500,7 +559,7 @@ final class DriveDocumentServiceTest extends TestCase
         $endless->setNextPageToken('AGAIN');
         $this->permissions->method('listPermissions')->willReturn($endless);
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(UnexpectedDriveStateException::class);
 
         $this->service()->listPermissions('doc');
     }
