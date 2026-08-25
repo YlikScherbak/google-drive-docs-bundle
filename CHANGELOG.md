@@ -6,6 +6,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `grant()`, `grantToGroup()`, `revoke()` and `listPermissions()` now check the viewer's
+  access to the item first and throw `AccessDeniedException` otherwise, like every other
+  operation on a single item already did. Before, a viewer who knew a file id could share
+  any document with themselves, revoke other people's access or read who a document is
+  shared with. Applications whose `ViewerContextInterface::seesEverything()` returns true
+  (the default `AllowAllViewerContext` included) are unaffected
+
+### Fixed
+- `permission_cache.ttl: 0` now means "do not use the shared pool" (per-request caching
+  only). Before, entries were saved without a lifetime and lived in the pool until it was
+  cleared — the opposite of what a zero lifetime suggests
+- `import()` verifies the size of the bytes it actually read, not only the size reported by
+  `filesize()`: a failed stat or a file growing while being read no longer slips an
+  oversized upload past `UploadTooLargeException`
+- `canAccess()` no longer turns a Google outage into a denial: only a 403/404 from Google
+  means "not shared", any other error surfaces. Likewise the sharing lookup used by listings
+  keeps swallowing transient API exceptions for the current request only, but lets programming
+  errors (`TypeError` and friends) propagate instead of silently hiding every document
+- `canAccess()` reports a missing `shared_drive_id` with `NotConfiguredException` right away
+  instead of walking up to 25 parents in vain
+- `move()` refuses with a `RuntimeException` when Google does not report the item's current
+  parent, rather than sending an empty `removeParents`
+- Folder ids passed to `listFolder()` / `listFolderPage()` are validated against Google's id
+  alphabet before they are interpolated into the Drive query
+- `deleteForever()` no longer mistakes a 403 carrying `rateLimitExceeded` /
+  `userRateLimitExceeded` (an exhausted quota after the retries) for a missing Manager role
+- `DocumentDeletedEvent` docblock described the trash; it is dispatched on permanent deletion
+- Matching Google's machine-readable `reason` no longer breaks on an error that carries none.
+  `Google\Service\Exception::getErrors()` returns null, not an empty array, whenever the
+  response body has no `error.errors` — a proxy 502, an empty 429 — and iterating that raised a
+  warning that a strict error handler (Symfony's, in dev) turns into a throw, masking the real
+  Google failure in `copy()`, `revoke()` and `deleteForever()`
+- `import()` reads at most one byte past the upload limit instead of the whole file, so a
+  failed `filesize()` can no longer pull an arbitrarily large file into memory before the size
+  check rejects it
+- `copy()` and `revoke()` recognise Google's `fileNotCopyable` / `cannotCopyFile` and
+  `cannotDeletePermission` / `cannotModifyInheritedPermission` by the machine-readable `reason`
+  instead of the wording of the message, which Google may change at any time
+- Every paginated walk (`listFolder()`, `search()`, `listTrash()`, `listPermissions()` and the
+  sharing lookup) stops with a `RuntimeException` after 1000 pages instead of looping — and
+  eventually running out of memory — on a `nextPageToken` that never ends
+
+### Added
+- A compiler pass that leaves a note in the container's compiler log while
+  `ViewerContextInterface` is still the default `AllowAllViewerContext`, so running without
+  visibility filtering is always a choice, never an oversight
+- CI job running the test suite against the lowest dependency versions `composer.json` allows
+
+### Changed
+- README documents that retries also cover non-idempotent writes and what that implies
+
 ## [0.3.0] - 2026-08-25
 
 ### Added

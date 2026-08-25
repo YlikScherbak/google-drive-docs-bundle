@@ -550,6 +550,12 @@ surface immediately rather than after three backoff waits.
 One thing the retry policy does not cover: refreshing the OAuth token happens outside Google's
 task runner, so a transient failure there still surfaces directly.
 
+The policy applies to every call, writes included. The Drive API offers no idempotency key, so
+in the rare case where Google completes a `create`, `copy` or `grant` and *then* answers with a
+5xx, the retry performs it a second time — a duplicated document or sharing entry. This is the
+same trade-off Google's own client libraries make; if a duplicate is unacceptable in your
+flow, set `retry.attempts: 0` for that call path and handle the failure yourself.
+
 ## Performance
 
 When visibility filtering is active the bundle asks Google for the sharing of every listed

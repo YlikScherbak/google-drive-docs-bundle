@@ -76,6 +76,13 @@ class DriveDocumentService
     /** The largest page Google's files.list accepts. */
     public const MAX_PAGE_SIZE = 1000;
 
+    /**
+     * Pages a single walk may fetch before it is treated as a runaway. A million items or
+     * a hundred thousand sharing entries is far beyond any real folder; a token that never
+     * runs out is an API fault, and looping on it would exhaust memory instead of failing.
+     */
+    private const MAX_PAGES = 1000;
+
     /** Google's ceiling for a one-request multipart upload. */
     public const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
@@ -246,27 +253,27 @@ class DriveDocumentService
             throw new \InvalidArgumentException(sprintf('Cannot read the file to import: "%s".', $path));
         }
 
+        // Checked twice on purpose: the stat keeps an oversized file out of memory, and the
+        // byte count catches a stat that failed or a file that grew in between.
         $size = filesize($path);
 
-        if ($size !== false && $size > self::MAX_UPLOAD_BYTES) {
-            throw new UploadTooLargeException(sprintf(
-                'This file is %d bytes, and a single Drive upload takes at most %d. Google needs its '
-                . 'resumable protocol beyond that, which this bundle does not implement yet — add the '
-                . 'file through Google Drive itself, or split it.',
-                $size,
-                self::MAX_UPLOAD_BYTES
-            ));
+        if ($size !== false) {
+            $this->assertUploadSize($size);
         }
 
         if ($parentId !== null) {
             $this->assertAccess($parentId);
         }
 
-        $contents = file_get_contents($path);
+        // Bounded read: when the stat above failed there is nothing else stopping a huge
+        // file from being pulled into memory before the size check below can reject it.
+        $contents = file_get_contents($path, false, null, 0, self::MAX_UPLOAD_BYTES + 1);
 
         if ($contents === false) {
             throw new \InvalidArgumentException(sprintf('Could not read the file to import: "%s".', $path));
         }
+
+        $this->assertUploadSize(strlen($contents));
 
         $filename   = basename($path);
         $extension  = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
@@ -382,8 +389,7 @@ class DriveDocumentService
                 'fields'            => self::FILE_FIELDS,
             ]);
         } catch (GoogleServiceException $e) {
-            if (str_contains($e->getMessage(), 'fileNotCopyable')
-                || str_contains($e->getMessage(), 'cannot be copied')) {
+            if ($this->hasReason($e, ['fileNotCopyable', 'cannotCopyFile'])) {
                 throw new NotCopyableException(
                     'Google cannot copy this item. Folders in particular have no copy operation: '
                     . 'recreate the folder with createFolder() and copy its files into it one by one.',
@@ -445,6 +451,13 @@ class DriveDocumentService
         ]);
 
         $previousParents = $current->getParents() ?? [];
+
+        if ($previousParents === []) {
+            throw new \RuntimeException(sprintf(
+                'Google did not report the current parent of "%s", so it cannot be moved safely.',
+                $fileId
+            ));
+        }
 
         $document = $this->mapFile($this->drive->files->update($fileId, new DriveFile(), [
             'addParents'        => $parentId ?: $this->sharedDriveId,
@@ -521,7 +534,7 @@ class DriveDocumentService
         try {
             $this->drive->files->delete($fileId, ['supportsAllDrives' => true]);
         } catch (GoogleServiceException $e) {
-            if ($e->getCode() === 403) {
+            if ($e->getCode() === 403 && !$this->isRateLimited($e)) {
                 throw new InsufficientDriveRoleException(
                     'Deleting for good requires the service user to be a Manager of the Shared Drive; '
                     . '"Content manager" may only move items to the trash. Either raise the role in '
@@ -562,10 +575,15 @@ class DriveDocumentService
      */
     public function listPermissions(string $fileId): array
     {
+        $this->assertAccess($fileId);
+
         $permissions = [];
         $pageToken   = null;
+        $pages       = 0;
 
         do {
+            $this->assertPageBudget(++$pages, 'permissions.list');
+
             $params = [
                 'supportsAllDrives' => true,
                 'fields'            => 'nextPageToken, permissions(id,emailAddress,role,type,displayName,permissionDetails)',
@@ -599,6 +617,7 @@ class DriveDocumentService
     ): DrivePermission {
         $this->assertRole($role);
         $this->assertType($type);
+        $this->assertAccess($fileId);
 
         $created = $this->drive->permissions->create($fileId, new GooglePermission([
             'type'         => $type,
@@ -631,10 +650,12 @@ class DriveDocumentService
 
     public function revoke(string $fileId, string $permissionId): void
     {
+        $this->assertAccess($fileId);
+
         try {
             $this->drive->permissions->delete($fileId, $permissionId, ['supportsAllDrives' => true]);
         } catch (GoogleServiceException $e) {
-            if (str_contains($e->getMessage(), 'inherited') || str_contains($e->getMessage(), 'cannotDeletePermission')) {
+            if ($this->hasReason($e, ['cannotDeletePermission', 'cannotModifyInheritedPermission'])) {
                 throw new InheritedPermissionException(
                     'This permission is inherited from a parent folder. Revoke it on that folder instead.'
                 );
@@ -657,6 +678,9 @@ class DriveDocumentService
             return true;
         }
 
+        // Without the drive id the walk could never reach the root and would burn 25 calls for nothing.
+        $this->assertConfigured();
+
         $identities = $email !== null && $email !== ''
             ? [$this->normalizeEmail($email)]
             : $this->viewerIdentities();
@@ -674,8 +698,15 @@ class DriveDocumentService
                     'supportsAllDrives' => true,
                     'fields'            => 'id,parents,permissions(emailAddress,type)',
                 ]);
-            } catch (\Throwable) {
-                return false;
+            } catch (GoogleServiceException $e) {
+                // An item the service user cannot even see is not shared with anyone we know of.
+                // Anything else — an outage, an expired credential — must surface, or every
+                // document would silently disappear for every viewer.
+                if (in_array($e->getCode(), [403, 404], true)) {
+                    return false;
+                }
+
+                throw $e;
             }
 
             if ($this->isGrantedTo($file, $identities)) {
@@ -710,6 +741,10 @@ class DriveDocumentService
     private function folderCriteria(?string $parentId): array
     {
         $this->assertConfigured();
+
+        if ($parentId !== null) {
+            $this->assertFileId($parentId);
+        }
 
         $needFilter = !$this->viewerContext->seesEverything();
 
@@ -772,8 +807,11 @@ class DriveDocumentService
     {
         $documents = [];
         $pageToken = null;
+        $pages     = 0;
 
         do {
+            $this->assertPageBudget(++$pages, 'files.list');
+
             $page = $this->queryPage($q, $filter, $pageToken, self::MAX_PAGE_SIZE);
 
             foreach ($page->items as $document) {
@@ -872,7 +910,11 @@ class DriveDocumentService
             return $this->grantCache[$fileId];
         }
 
-        $item = $this->permissionCache?->getItem($this->cacheKey($fileId));
+        // A zero TTL keeps the lookups out of the shared pool: an entry saved without a
+        // lifetime would otherwise live there until the pool is cleared.
+        $item = $this->permissionCacheTtl > 0
+            ? $this->permissionCache?->getItem($this->cacheKey($fileId))
+            : null;
 
         if ($item !== null && $item->isHit()) {
             /** @var string[] $cached */
@@ -883,9 +925,12 @@ class DriveDocumentService
 
         $emails    = [];
         $pageToken = null;
+        $pages     = 0;
 
         try {
             do {
+                $this->assertPageBudget(++$pages, 'permissions.list');
+
                 $params = [
                     'supportsAllDrives' => true,
                     'fields'            => 'nextPageToken, permissions(emailAddress,type)',
@@ -907,19 +952,15 @@ class DriveDocumentService
 
                 $pageToken = $response->getNextPageToken();
             } while ($pageToken !== null);
-        } catch (\Throwable) {
-            // Do not cache failures: a transient API error must not hide documents
-            // for the whole TTL.
+        } catch (\Exception) {
+            // Hide the item for this request only: a transient API error must not hide
+            // documents for the whole TTL. Errors (TypeError and friends) are bugs and propagate.
             return $this->grantCache[$fileId] = [];
         }
 
         if ($item !== null) {
             $item->set($emails);
-
-            if ($this->permissionCacheTtl > 0) {
-                $item->expiresAfter($this->permissionCacheTtl);
-            }
-
+            $item->expiresAfter($this->permissionCacheTtl);
             $this->permissionCache?->save($item);
         }
 
@@ -1142,6 +1183,72 @@ class DriveDocumentService
                 $type,
                 implode(', ', self::ALLOWED_TYPES)
             ));
+        }
+    }
+
+    /**
+     * @throws UploadTooLargeException
+     */
+    private function assertUploadSize(int $bytes): void
+    {
+        if ($bytes > self::MAX_UPLOAD_BYTES) {
+            throw new UploadTooLargeException(sprintf(
+                'This file is %d bytes, and a single Drive upload takes at most %d. Google needs its '
+                . 'resumable protocol beyond that, which this bundle does not implement yet — add the '
+                . 'file through Google Drive itself, or split it.',
+                $bytes,
+                self::MAX_UPLOAD_BYTES
+            ));
+        }
+    }
+
+    /**
+     * Drive reports exhausted quota behind a 403; once the retries are spent it arrives here.
+     */
+    private function isRateLimited(GoogleServiceException $e): bool
+    {
+        return $this->hasReason($e, ['rateLimitExceeded', 'userRateLimitExceeded']);
+    }
+
+    /**
+     * Whether Google attached one of the given machine-readable reasons to the error.
+     * The wording of the message is not a contract; the reason is.
+     *
+     * getErrors() is null, not empty, whenever the response body carried no "error.errors"
+     * — a proxy 502, an empty 429 — so the coalesce is load-bearing: iterating null raises a
+     * warning that a strict error handler turns into a throw, masking the real failure.
+     *
+     * @param string[] $reasons
+     */
+    private function hasReason(GoogleServiceException $e, array $reasons): bool
+    {
+        foreach ($e->getErrors() ?? [] as $error) {
+            if (in_array($error['reason'] ?? null, $reasons, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function assertPageBudget(int $pages, string $call): void
+    {
+        if ($pages > self::MAX_PAGES) {
+            throw new \RuntimeException(sprintf(
+                'Google kept returning a nextPageToken for %s beyond %d pages; giving up on what looks like a runaway listing.',
+                $call,
+                self::MAX_PAGES
+            ));
+        }
+    }
+
+    /**
+     * Ids are interpolated into Drive queries, so only Google's own alphabet may pass.
+     */
+    private function assertFileId(string $fileId): void
+    {
+        if (preg_match('/^[A-Za-z0-9_-]+$/', $fileId) !== 1) {
+            throw new \InvalidArgumentException(sprintf('"%s" is not a valid Google Drive item id.', $fileId));
         }
     }
 

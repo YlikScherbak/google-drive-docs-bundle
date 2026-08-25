@@ -52,7 +52,7 @@ class Configuration implements ConfigurationInterface
                         ->integerNode('ttl')
                             ->defaultValue(300)
                             ->min(0)
-                            ->info('Lifetime in seconds. Keep it short: sharing may also change directly in Google.')
+                            ->info('Lifetime in seconds. Keep it short: sharing may also change directly in Google. 0 keeps lookups out of the pool (per-request caching only).')
                         ->end()
                     ->end()
                 ->end()

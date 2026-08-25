@@ -68,7 +68,8 @@ final class DriveDocumentServiceCacheTest extends TestCase
 
         self::assertSame([], $this->service()->listFolder());
 
-        $this->service()->grant('doc-1', 'viewer@example.com');
+        // Sharing is an administrator's job; the viewer's next listing must see it right away.
+        $this->service(true, true)->grant('doc-1', 'viewer@example.com');
 
         self::assertCount(1, $this->service()->listFolder(), 'the new grant must be visible immediately');
         self::assertSame(2, $calls);
@@ -89,7 +90,7 @@ final class DriveDocumentServiceCacheTest extends TestCase
 
         self::assertCount(1, $this->service()->listFolder());
 
-        $this->service()->revoke('doc-1', 'perm-1');
+        $this->service(true, true)->revoke('doc-1', 'perm-1');
 
         self::assertSame([], $this->service()->listFolder(), 'the revoked access must disappear immediately');
     }
@@ -116,6 +117,29 @@ final class DriveDocumentServiceCacheTest extends TestCase
         self::assertCount(1, $this->service()->listFolder());
     }
 
+    public function testAZeroTtlKeepsTheSharingOutOfTheSharedPool(): void
+    {
+        $this->files->method('listFiles')->willReturn($this->fileList([$this->file('doc-1', 'Doc')]));
+        // Two requests, one pool, no lifetime: neither may read a stale entry left by the other.
+        $this->permissions->expects(self::exactly(2))
+            ->method('listPermissions')
+            ->willReturn($this->permissionList(['viewer@example.com']));
+
+        self::assertCount(1, $this->service(true, false, 0)->listFolder());
+        self::assertCount(1, $this->service(true, false, 0)->listFolder());
+        self::assertFalse($this->cache->hasItem('google_drive_docs.grants.' . sha1('doc-1')));
+    }
+
+    public function testProgrammingErrorsInTheSharingLookupAreNotSwallowed(): void
+    {
+        $this->files->method('listFiles')->willReturn($this->fileList([$this->file('doc-1', 'Doc')]));
+        $this->permissions->method('listPermissions')->willThrowException(new \TypeError('broken mapping'));
+
+        $this->expectException(\TypeError::class);
+
+        $this->service()->listFolder();
+    }
+
     public function testTheServiceWorksWithoutACachePool(): void
     {
         $this->files->method('listFiles')->willReturn($this->fileList([$this->file('doc-1', 'Doc')]));
@@ -127,7 +151,7 @@ final class DriveDocumentServiceCacheTest extends TestCase
         self::assertCount(1, $this->service(false)->listFolder());
     }
 
-    private function service(bool $withCache = true): DriveDocumentService
+    private function service(bool $withCache = true, bool $asAdministrator = false, int $ttl = 300): DriveDocumentService
     {
         $drive              = $this->createMock(Drive::class);
         $drive->files       = $this->files;
@@ -135,13 +159,13 @@ final class DriveDocumentServiceCacheTest extends TestCase
 
         return new DriveDocumentService(
             $drive,
-            new FakeViewerContext('viewer@example.com'),
+            new FakeViewerContext($asAdministrator ? 'admin@example.com' : 'viewer@example.com', $asAdministrator),
             self::DRIVE_ID,
             ['application/vnd.google-apps.spreadsheet'],
             false,
             null,
             $withCache ? $this->cache : null,
-            300
+            $ttl
         );
     }
 

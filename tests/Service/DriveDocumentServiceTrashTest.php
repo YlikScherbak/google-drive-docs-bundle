@@ -215,6 +215,40 @@ final class DriveDocumentServiceTrashTest extends TestCase
         $this->service()->deleteForever('doc-1');
     }
 
+    public function testDeleteForeverDoesNotMistakeAnExhaustedRateLimitForAMissingRole(): void
+    {
+        // Drive reports quota problems behind a 403; once the retries are spent it must surface as such.
+        $this->files->method('delete')->willThrowException(
+            new GoogleServiceException('Rate Limit Exceeded', 403, null, [['reason' => 'rateLimitExceeded']])
+        );
+
+        $this->expectException(GoogleServiceException::class);
+
+        $this->service()->deleteForever('doc');
+    }
+
+    public function testDeleteForeverHandlesA403CarryingNoMachineReadableReasons(): void
+    {
+        // getErrors() is null whenever Google's body has no "error.errors"; checking whether
+        // the 403 is a rate limit must not blow up on that.
+        $this->files->method('delete')->willThrowException(
+            new GoogleServiceException('The user does not have sufficient permissions for this file.', 403, null, null)
+        );
+
+        set_error_handler(static function (int $severity, string $message): bool {
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            $this->service()->deleteForever('doc-1');
+            self::fail('Expected the missing role to be reported.');
+        } catch (InsufficientDriveRoleException $e) {
+            self::assertStringContainsString('Manager', $e->getMessage());
+        } finally {
+            restore_error_handler();
+        }
+    }
+
     public function testDeleteForeverLeavesOtherGoogleErrorsAlone(): void
     {
         $this->files->method('delete')->willThrowException(

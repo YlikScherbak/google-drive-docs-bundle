@@ -128,6 +128,15 @@ final class DriveDocumentServicePaginationTest extends TestCase
         self::assertSame(['TOKEN-2', 'TOKEN-3'], [$this->requests[1]['pageToken'], $this->requests[2]['pageToken']]);
     }
 
+    public function testAnEndlessPaginationIsCutOffInsteadOfLoopingForever(): void
+    {
+        $this->files->method('listFiles')->willReturn($this->fileList([$this->file('doc', 'Doc')], 'AGAIN'));
+
+        $this->expectException(\RuntimeException::class);
+
+        $this->service()->listFolder();
+    }
+
     public function testFetchingEverythingUsesTheLargestPageToSaveRoundTrips(): void
     {
         $this->respondWith([$this->fileList([], null)]);

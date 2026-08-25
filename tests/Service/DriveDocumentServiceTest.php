@@ -292,12 +292,37 @@ final class DriveDocumentServiceTest extends TestCase
     public function testRevokeTranslatesInheritedPermissionErrors(): void
     {
         $this->permissions->method('delete')->willThrowException(
-            new GoogleServiceException('The authenticated user cannot delete the permission. If the permission is inherited...', 403)
+            new GoogleServiceException(
+                'The authenticated user cannot delete the permission. If the permission is inherited...',
+                403,
+                null,
+                [['reason' => 'cannotModifyInheritedPermission']]
+            )
         );
 
         $this->expectException(InheritedPermissionException::class);
 
         $this->service()->revoke('doc', 'perm-1');
+    }
+
+    public function testRevokeSurvivesAGoogleErrorCarryingNoMachineReadableReasons(): void
+    {
+        $this->permissions->method('delete')->willThrowException(
+            new GoogleServiceException('Forbidden', 403, null, null)
+        );
+
+        set_error_handler(static function (int $severity, string $message): bool {
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            $this->service()->revoke('doc', 'perm-1');
+            self::fail('Expected the Google error to surface.');
+        } catch (GoogleServiceException $e) {
+            self::assertSame(403, $e->getCode());
+        } finally {
+            restore_error_handler();
+        }
     }
 
     public function testListPermissionsFlagsInheritedEntries(): void
@@ -360,6 +385,135 @@ final class DriveDocumentServiceTest extends TestCase
         $this->expectException(NotConfiguredException::class);
 
         $this->service(null, '')->listFolder();
+    }
+
+    public function testGrantOnAForeignItemIsDenied(): void
+    {
+        $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, [self::DRIVE_ID]));
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([]));
+        $this->permissions->expects(self::never())->method('create');
+
+        $this->expectException(AccessDeniedException::class);
+
+        $this->service(new FakeViewerContext('viewer@example.com'))->grant('doc', 'viewer@example.com', 'writer');
+    }
+
+    public function testRevokeOnAForeignItemIsDenied(): void
+    {
+        $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, [self::DRIVE_ID]));
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([]));
+        $this->permissions->expects(self::never())->method('delete');
+
+        $this->expectException(AccessDeniedException::class);
+
+        $this->service(new FakeViewerContext('viewer@example.com'))->revoke('doc', 'perm-1');
+    }
+
+    public function testListPermissionsOfAForeignItemIsDenied(): void
+    {
+        $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, [self::DRIVE_ID]));
+        // The access check itself asks for the direct grants; nothing else may be listed.
+        $this->permissions->expects(self::once())->method('listPermissions')->willReturn($this->permissionList([]));
+
+        $this->expectException(AccessDeniedException::class);
+
+        $this->service(new FakeViewerContext('viewer@example.com'))->listPermissions('doc');
+    }
+
+    public function testCanAccessTreatsAnUnknownItemAsNotShared(): void
+    {
+        $this->files->method('get')->willThrowException(new GoogleServiceException('File not found', 404));
+
+        self::assertFalse($this->service(new FakeViewerContext('viewer@example.com'))->canAccess('doc'));
+    }
+
+    public function testCanAccessDoesNotHideGoogleOutagesBehindADenial(): void
+    {
+        // A 5xx after the retries are spent is an outage, not a missing grant.
+        $this->files->method('get')->willThrowException(new GoogleServiceException('Backend Error', 503));
+
+        $this->expectException(GoogleServiceException::class);
+
+        $this->service(new FakeViewerContext('viewer@example.com'))->canAccess('doc');
+    }
+
+    public function testCanAccessNeedsAConfiguredDriveBeforeWalkingTheTree(): void
+    {
+        $this->files->expects(self::never())->method('get');
+
+        $this->expectException(NotConfiguredException::class);
+
+        $this->service(new FakeViewerContext('viewer@example.com'), '')->canAccess('doc');
+    }
+
+    public function testMoveRefusesWhenGoogleDoesNotReportTheCurrentParent(): void
+    {
+        $this->files->method('get')->willReturn($this->file('doc', 'Doc', null, []));
+        $this->files->expects(self::never())->method('update');
+
+        $this->expectException(\RuntimeException::class);
+
+        $this->service()->move('doc', 'new-parent');
+    }
+
+    public function testListFolderRejectsAMalformedFolderId(): void
+    {
+        $this->files->expects(self::never())->method('listFiles');
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->service()->listFolder("x' or trashed=false or '");
+    }
+
+    public function testCanAccessGivesUpOnAnEndlessParentChain(): void
+    {
+        // Every item points to yet another parent and the drive root never comes.
+        $this->files->expects(self::exactly(25))->method('get')->willReturnCallback(
+            fn (string $id): DriveFile => $this->file($id, 'Item', null, [$id . '-parent'])
+        );
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([]));
+
+        self::assertFalse($this->service(new FakeViewerContext('viewer@example.com'))->canAccess('doc'));
+    }
+
+    public function testSearchEscapesBackslashesInTheQuery(): void
+    {
+        $captured = null;
+
+        $this->files->method('listFiles')->willReturnCallback(
+            function (array $params) use (&$captured): FileList {
+                $captured = $params;
+
+                return $this->fileList([]);
+            }
+        );
+
+        $this->service()->search('C:\Users');
+
+        self::assertStringContainsString("name contains 'C:\\\\Users'", $captured['q']);
+    }
+
+    public function testListPermissionsStopsWhenGoogleKeepsPaginatingForever(): void
+    {
+        $endless = new PermissionList();
+        $endless->setPermissions([]);
+        $endless->setNextPageToken('AGAIN');
+        $this->permissions->method('listPermissions')->willReturn($endless);
+
+        $this->expectException(\RuntimeException::class);
+
+        $this->service()->listPermissions('doc');
+    }
+
+    public function testRevokeRecognisesInheritedPermissionsByGoogleReason(): void
+    {
+        $this->permissions->method('delete')->willThrowException(
+            new GoogleServiceException('Forbidden', 403, null, [['reason' => 'cannotDeletePermission']])
+        );
+
+        $this->expectException(InheritedPermissionException::class);
+
+        $this->service()->revoke('doc', 'perm-1');
     }
 
     public function testAssertAccessRejectsForeignItems(): void

@@ -106,13 +106,37 @@ final class DriveDocumentServiceCopyTest extends TestCase
 
     public function testCopyExplainsThatFoldersCannotBeCopied(): void
     {
+        // Matched on Google's machine-readable reason, not on the wording of the message.
         $this->files->method('copy')->willThrowException(
-            new GoogleServiceException('fileNotCopyable: Files of this type cannot be copied.', 403)
+            new GoogleServiceException('Forbidden', 403, null, [['reason' => 'fileNotCopyable']])
         );
 
         $this->expectException(NotCopyableException::class);
 
         $this->service()->copy('folder-1');
+    }
+
+    public function testCopySurvivesAGoogleErrorCarryingNoMachineReadableReasons(): void
+    {
+        // Google's client passes null when the error body has no "error.errors" — a proxy 502,
+        // an empty 429. A strict error handler, like Symfony's in dev, turns iterating that
+        // null into a throw that would mask the real failure.
+        $this->files->method('copy')->willThrowException(
+            new GoogleServiceException('Forbidden', 403, null, null)
+        );
+
+        set_error_handler(static function (int $severity, string $message): bool {
+            throw new \ErrorException($message, 0, $severity);
+        });
+
+        try {
+            $this->service()->copy('doc-1');
+            self::fail('Expected the Google error to surface.');
+        } catch (GoogleServiceException $e) {
+            self::assertSame(403, $e->getCode());
+        } finally {
+            restore_error_handler();
+        }
     }
 
     public function testCopyLeavesOtherGoogleErrorsAlone(): void
