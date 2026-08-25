@@ -183,6 +183,7 @@ $permissions = $this->drive->listPermissions($doc->id);
 $this->drive->grant($folder->id, 'user@example.com', 'writer');
 $this->drive->grantToGroup($folder->id, 'portugal@example.com', 'writer'); // whole team at once
 $this->drive->revoke($doc->id, $permissionId);
+$this->drive->roleOf($doc->id);                            // 'reader' | 'writer' | ... | null
 $this->drive->grantAsService($doc->id, $email, 'writer');  // the application acting, not the viewer
 
 // Embed in your UI
@@ -272,9 +273,31 @@ With that in place:
 
 The check is about **reach, not role**: a viewer who holds a `reader` grant on a spreadsheet
 passes it, and the bundle then acts as the service user — which can rename, move, trash and,
-with `SpreadsheetService`, overwrite cells. If your UI has to tell readers from editors, read
-the viewer's role from `listPermissions()` (or your own domain model) before offering a mutating
-action; the bundle does not do that for you yet.
+with `SpreadsheetService`, overwrite cells.
+
+`roleOf()` tells you what the viewer actually holds, so your own authorisation layer can decide
+what to offer:
+
+```php
+if ($this->drive->roleOf($fileId) === DrivePermission::ROLE_READER) {
+    // show it, but no edit, rename or delete buttons
+}
+```
+
+It reports, it does not enforce — deliberately. Which role should be required for which
+operation is the application's call, not the bundle's: Google itself wants `organizer` for some
+sharing changes and `writer` for others depending on how the drive is configured, and a wrong
+answer baked into a library locks people out of their own documents. So the bundle hands you the
+fact and stays out of the decision.
+
+Where several grants apply — named directly and through a group, on the item and on a folder
+above it — the strongest wins, the way Google resolves it. Roles the bundle cannot hand out
+itself (`owner`, `organizer`, `fileOrganizer`, which come from the drive's own membership) are
+reported as they are. For a viewer whose `seesEverything()` is true the answer is `null`: nothing
+is looked up for them, and a role would mean nothing, since they bypass filtering anyway.
+
+One cost worth knowing: `roleOf()` walks the same parent chain as the access check, so it is a
+per-item question. Ask it on the page for one document, not once per row of a listing.
 
 A typical layout is one folder per team or country: share `Portugal` with the Portuguese team and they see that folder and everything inside it — and nothing else.
 

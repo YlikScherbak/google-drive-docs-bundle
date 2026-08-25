@@ -55,6 +55,22 @@ class DriveDocumentService
         DrivePermission::ROLE_WRITER,
     ];
 
+    /**
+     * Roles from weakest to strongest, for resolving what a viewer effectively holds.
+     *
+     * Wider than ALLOWED_ROLES on purpose: the bundle cannot hand out owner, organizer or
+     * fileOrganizer — those come from the Shared Drive's own membership — but it will meet
+     * them when reading and must report them rather than pretend they are unknown.
+     */
+    private const ROLE_STRENGTH = [
+        DrivePermission::ROLE_READER,
+        DrivePermission::ROLE_COMMENTER,
+        DrivePermission::ROLE_WRITER,
+        'fileOrganizer',
+        'organizer',
+        'owner',
+    ];
+
     private const ALLOWED_TYPES = [
         DrivePermission::TYPE_USER,
         DrivePermission::TYPE_GROUP,
@@ -740,7 +756,7 @@ class DriveDocumentService
             try {
                 $file = $this->drive->files->get($cursor, [
                     'supportsAllDrives' => true,
-                    'fields'            => 'id,parents,permissions(emailAddress,type)',
+                    'fields'            => 'id,parents,permissions(emailAddress,type,role)',
                 ]);
             } catch (GoogleServiceException $e) {
                 // An item the service user cannot even see is not shared with anyone we know of.
@@ -761,6 +777,63 @@ class DriveDocumentService
         }
 
         return false;
+    }
+
+    /**
+     * The role the current viewer effectively holds on an item, or null when they hold none.
+     *
+     * Reports, it does not enforce: canAccess() still passes anyone with any grant, and the
+     * bundle still performs the operation as the service user. Use this to decide what to
+     * offer — grey out an edit button for a reader — and keep the decision in your own
+     * authorisation layer.
+     *
+     * Where several grants apply — named directly and through a group, on the item and on a
+     * folder above it — the strongest wins, which is how Google resolves it too. Roles the
+     * bundle cannot grant (owner, organizer, fileOrganizer) are reported as they are.
+     *
+     * Null for a viewer whose seesEverything() is true: nothing is looked up for them, and a
+     * role would not mean anything, since they bypass filtering and act as the service user.
+     */
+    public function roleOf(string $fileId): ?string
+    {
+        if ($this->viewerContext->seesEverything()) {
+            return null;
+        }
+
+        $this->assertConfigured();
+
+        $identities = $this->viewerIdentities();
+
+        if ($identities === []) {
+            return null;
+        }
+
+        $best   = null;
+        $cursor = $fileId;
+        $guard  = 0;
+
+        while ($cursor !== null && $cursor !== $this->sharedDriveId && $guard++ < 25) {
+            try {
+                $file = $this->drive->files->get($cursor, [
+                    'supportsAllDrives' => true,
+                    'fields'            => 'id,parents,permissions(emailAddress,type,role)',
+                ]);
+            } catch (GoogleServiceException $e) {
+                if (in_array($e->getCode(), [403, 404], true)) {
+                    return $best;
+                }
+
+                throw $e;
+            }
+
+            foreach ($this->grantsFor($file, $identities) as $role) {
+                $best = $this->strongerRole($best, $role);
+            }
+
+            $cursor = ($file->getParents() ?? [])[0] ?? null;
+        }
+
+        return $best;
     }
 
     /**
@@ -885,7 +958,7 @@ class DriveDocumentService
             'driveId'                   => $this->sharedDriveId,
             'includeItemsFromAllDrives' => true,
             'supportsAllDrives'         => true,
-            'fields'                    => 'nextPageToken, files(' . self::FILE_FIELDS . ',permissions(emailAddress,type))',
+            'fields'                    => 'nextPageToken, files(' . self::FILE_FIELDS . ',permissions(emailAddress,type,role))',
             'orderBy'                   => 'folder,modifiedTime desc',
             'pageSize'                  => max(1, min($pageSize, self::MAX_PAGE_SIZE)),
         ];
@@ -946,9 +1019,9 @@ class DriveDocumentService
      * Direct grants of an item. Shared Drives usually omit "permissions" from
      * files.list/get, so the dedicated permissions.list call is the reliable source.
      *
-     * @return string[] normalised e-mails
+     * @return array<string, string> normalised e-mail => strongest role held on the item
      */
-    private function directGrantEmails(string $fileId): array
+    private function directGrants(string $fileId): array
     {
         if (isset($this->grantCache[$fileId])) {
             return $this->grantCache[$fileId];
@@ -961,13 +1034,13 @@ class DriveDocumentService
             : null;
 
         if ($item !== null && $item->isHit()) {
-            /** @var string[] $cached */
+            /** @var array<string, string> $cached */
             $cached = $item->get();
 
             return $this->grantCache[$fileId] = $cached;
         }
 
-        $emails    = [];
+        $grants    = [];
         $pageToken = null;
         $pages     = 0;
 
@@ -977,7 +1050,7 @@ class DriveDocumentService
 
                 $params = [
                     'supportsAllDrives' => true,
-                    'fields'            => 'nextPageToken, permissions(emailAddress,type)',
+                    'fields'            => 'nextPageToken, permissions(emailAddress,type,role)',
                     'pageSize'          => 100,
                 ];
 
@@ -988,10 +1061,15 @@ class DriveDocumentService
                 $response = $this->drive->permissions->listPermissions($fileId, $params);
 
                 foreach ($response->getPermissions() as $permission) {
-                    if (in_array($permission->getType(), self::ALLOWED_TYPES, true)
-                        && $permission->getEmailAddress()) {
-                        $emails[] = $this->normalizeEmail($permission->getEmailAddress());
+                    if (!in_array($permission->getType(), self::ALLOWED_TYPES, true)
+                        || !$permission->getEmailAddress()) {
+                        continue;
                     }
+
+                    $email = $this->normalizeEmail($permission->getEmailAddress());
+
+                    $grants[$email] = $this->strongerRole($grants[$email] ?? null, $permission->getRole())
+                        ?? DrivePermission::ROLE_READER;
                 }
 
                 $pageToken = $response->getNextPageToken();
@@ -1003,12 +1081,12 @@ class DriveDocumentService
         }
 
         if ($item !== null) {
-            $item->set($emails);
+            $item->set($grants);
             $item->expiresAfter($this->permissionCacheTtl);
             $this->permissionCache?->save($item);
         }
 
-        return $this->grantCache[$fileId] = $emails;
+        return $this->grantCache[$fileId] = $grants;
     }
 
     /**
@@ -1016,18 +1094,62 @@ class DriveDocumentService
      */
     private function isGrantedTo(DriveFile $file, array $identities): bool
     {
+        return $this->grantsFor($file, $identities) !== [];
+    }
+
+    /**
+     * The roles the given identities hold on an item, from the file's own permissions when
+     * Google sent them and from the dedicated lookup otherwise.
+     *
+     * @param string[] $identities normalised e-mail plus the viewer group addresses
+     * @return list<string> one role per matching grant, unranked
+     */
+    private function grantsFor(DriveFile $file, array $identities): array
+    {
         if ($identities === []) {
-            return false;
+            return [];
         }
+
+        $roles = [];
 
         foreach ($file->getPermissions() ?? [] as $permission) {
             if (in_array($permission->getType(), self::ALLOWED_TYPES, true)
                 && in_array($this->normalizeEmail((string) $permission->getEmailAddress()), $identities, true)) {
-                return true;
+                $roles[] = $permission->getRole() ?? DrivePermission::ROLE_READER;
             }
         }
 
-        return array_intersect($identities, $this->directGrantEmails($file->getId())) !== [];
+        if ($roles !== []) {
+            return $roles;
+        }
+
+        foreach ($this->directGrants($file->getId()) as $email => $role) {
+            if (in_array($email, $identities, true)) {
+                $roles[] = $role;
+            }
+        }
+
+        return $roles;
+    }
+
+    /**
+     * The stronger of two roles, treating an unrecognised one as the weaker candidate so a
+     * role Google may add later never silently outranks a known one.
+     */
+    private function strongerRole(?string $current, ?string $candidate): ?string
+    {
+        if ($candidate === null || $candidate === '') {
+            return $current;
+        }
+
+        if ($current === null) {
+            return $candidate;
+        }
+
+        $a = array_search($current, self::ROLE_STRENGTH, true);
+        $b = array_search($candidate, self::ROLE_STRENGTH, true);
+
+        return ($b === false ? -1 : $b) > ($a === false ? -1 : $a) ? $candidate : $current;
     }
 
     /**
@@ -1211,7 +1333,9 @@ class DriveDocumentService
     private function cacheKey(string $fileId): string
     {
         // PSR-6 keys allow a limited character set; Google file ids do not fit it.
-        return 'google_drive_docs.grants.' . sha1($fileId);
+        // The version travels in the key: 0.4.0 and earlier cached a plain list of e-mails
+        // where this now expects a role map, and reading one as the other is nonsense.
+        return 'google_drive_docs.grants.v2.' . sha1($fileId);
     }
 
     private function dispatch(object $event): void

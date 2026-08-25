@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `roleOf()` reports the role the current viewer effectively holds on an item — the strongest of
+  every grant that applies, whether it names them directly or reaches them through a group, on
+  the item itself or on a folder above it. Roles the bundle cannot grant (`owner`, `organizer`,
+  `fileOrganizer`) are reported as they are; a viewer whose `seesEverything()` is true gets
+  `null`, since nothing is looked up for them. Until now the access check was about reach only,
+  and an application had no way to tell a reader from an editor short of reading
+  `listPermissions()` itself
+- The sharing lookup now asks Google for `role` alongside the address, so the answer costs no
+  extra request
+
+### Changed
+- `roleOf()` reports, it does not enforce: `canAccess()` still passes anyone holding any grant,
+  and the bundle still performs the operation as the service user. Which role a given operation
+  should require stays the application's decision — Google's own answer varies with how the
+  Shared Drive is configured, and a wrong one baked into a library locks people out
+- The permission cache stores a role per address rather than a bare list of addresses, so its
+  key carries a version. Entries written by 0.4.0 and earlier are not read back — expect one
+  cold lookup per item after upgrading, nothing more
+
 ## [0.4.0] - 2026-08-25
 
 ### Added
