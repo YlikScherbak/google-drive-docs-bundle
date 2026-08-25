@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Borsche\GoogleDriveDocsBundle\DependencyInjection;
 
+use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
@@ -52,6 +53,27 @@ class Configuration implements ConfigurationInterface
                             ->defaultValue(300)
                             ->min(0)
                             ->info('Lifetime in seconds. Keep it short: sharing may also change directly in Google.')
+                        ->end()
+                    ->end()
+                ->end()
+                ->arrayNode('retry')
+                    ->info('Exponential backoff for rate limits and transient Google faults.')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->integerNode('attempts')
+                            ->defaultValue(GoogleClientFactory::DEFAULT_RETRY_ATTEMPTS)
+                            ->min(0)
+                            ->info('Extra tries after the first failure. 0 disables retrying.')
+                        ->end()
+                        ->floatNode('initial_delay')
+                            ->defaultValue(GoogleClientFactory::DEFAULT_INITIAL_DELAY)
+                            ->min(0)
+                            ->info('Seconds to wait before the first retry; doubles on each further one.')
+                        ->end()
+                        ->floatNode('max_delay')
+                            ->defaultValue(GoogleClientFactory::DEFAULT_MAX_DELAY)
+                            ->min(0.001)
+                            ->info('Upper bound in seconds for a single wait.')
                         ->end()
                     ->end()
                 ->end()

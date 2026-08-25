@@ -41,6 +41,25 @@ final class DriveDocumentTest extends TestCase
             'webViewLink'  => 'https://docs.google.com/spreadsheets/d/file-1/edit',
             'modifiedTime' => '2026-01-01T00:00:00.000Z',
             'type'         => 'document',
+            'trashed'      => false,
+            'createdTime'  => null,
+            'size'         => null,
+            'iconLink'     => null,
+            'thumbnailLink' => null,
+            'lastModifiedBy' => null,
+            'capabilities' => null,
         ], $doc->toArray());
+    }
+
+    public function testTrashedDefaultsToFalseAndIsExposed(): void
+    {
+        $doc = new DriveDocument('file-1', 'Prices', null, null, null, DriveDocument::TYPE_DOCUMENT);
+
+        self::assertFalse($doc->trashed);
+
+        $trashed = new DriveDocument('file-1', 'Prices', null, null, null, DriveDocument::TYPE_DOCUMENT, true);
+
+        self::assertTrue($trashed->trashed);
+        self::assertTrue($trashed->toArray()['trashed']);
     }
 }

@@ -30,6 +30,9 @@ class GoogleDriveDocsExtension extends Extension
             $config['client_id'],
             $config['client_secret'],
             $config['refresh_token'],
+            $config['retry']['attempts'],
+            $config['retry']['initial_delay'],
+            $config['retry']['max_delay'],
         ]);
         $factory->setPublic(false);
         $container->setDefinition(GoogleClientFactory::class, $factory);

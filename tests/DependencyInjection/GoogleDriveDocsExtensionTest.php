@@ -47,4 +47,19 @@ final class GoogleDriveDocsExtensionTest extends TestCase
         self::assertSame(['application/vnd.google-apps.document'], $arguments[3]);
         self::assertTrue($arguments[4]);
     }
+
+    public function testRetrySettingsReachTheClientFactory(): void
+    {
+        $container = new ContainerBuilder();
+
+        (new GoogleDriveDocsExtension())->load([[
+            'retry' => ['attempts' => 5, 'initial_delay' => 0.25, 'max_delay' => 10.0],
+        ]], $container);
+
+        $arguments = $container->getDefinition(GoogleClientFactory::class)->getArguments();
+
+        self::assertSame(5, $arguments[3]);
+        self::assertSame(0.25, $arguments[4]);
+        self::assertSame(10.0, $arguments[5]);
+    }
 }
