@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-25
+
 ### Security
 - `grant()`, `grantToGroup()`, `revoke()` and `listPermissions()` now check the viewer's
   access to the item first and throw `AccessDeniedException` otherwise, like every other
@@ -163,7 +165,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/releases/tag/v0.1.0
