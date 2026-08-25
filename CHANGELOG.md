@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `SpreadsheetService::format()` starts a formatting pass and sends the whole thing as one
+  `spreadsheets.batchUpdate`: `style()` (bold, italic, font size, colour, background,
+  horizontal alignment, wrapping), `numberFormat()`, `freeze()`, `autoResizeColumns()`,
+  `columnWidth()`, `merge()` and `unmerge()`. Data filled into a template no longer has to
+  look raw
+- `SpreadsheetService::addTab()` adds a tab and returns the numeric sheet id Google assigned
+- `SheetRange` parses A1 notation into the zero-based, half-open indices Google's formatting
+  calls want, so callers keep writing `'Q3!A1:D10'` and never meet a `GridRange`. Handles
+  quoted tab names, doubled apostrophes, open-ended ranges (`D2:D`, `A:D10`), whole columns
+  and rows, and normalises a reversed range
+- The rest of the formatting surface on the same pass: `borders()`, `bandedRows()`,
+  `conditionalFormat()`, `dataValidation()`, `basicFilter()`, `clearBasicFilter()`,
+  `protect()`, `rowHeight()`, `hideTab()`, `showTab()` and `tabColor()`. Conditions use
+  Google's own vocabulary (`NUMBER_LESS`, `ONE_OF_LIST`, `CUSTOM_FORMULA`, …) and are passed
+  through rather than mirrored in a list the bundle would have to keep current
+- `SpreadsheetService::renameTab()` and `deleteTab()`. Renaming keeps the numeric sheet id, so
+  formulas and charts pointing at the tab keep working, and refuses a title another tab holds.
+  Deleting refuses the last remaining tab, and has no undo beyond the spreadsheet's own version
+  history — treat it the way you treat `deleteForever()`
+- `SheetFormattedEvent`, `SheetTabAddedEvent`, `SheetTabRenamedEvent` and `SheetTabDeletedEvent`
+
+### Notes
+- `style()` writes only the attributes it is given. Google's `repeatCell` clears everything its
+  field mask covers, so each call builds a mask naming exactly what was asked for — passing
+  `bold: true` leaves the background, alignment and number format on those cells alone
+- `freeze()` and `autoResizeColumns()` take a tab name rather than a range, because a bare `Q3`
+  in A1 notation is the cell Q3 and a range would be ambiguous exactly where it matters
+- No `unprotect()`: removing a protection means finding the id Google assigned it, which is
+  work for whoever is looking at the spreadsheet rather than for something generating one
+- Not covered: charts and pivot tables, named ranges, developer metadata, and sorting a range
+  in place
+
 ## [0.5.0] - 2026-08-25
 
 ### Added

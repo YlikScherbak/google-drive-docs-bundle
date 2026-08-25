@@ -6,10 +6,19 @@ namespace Borsche\GoogleDriveDocsBundle\Service;
 
 use Borsche\GoogleDriveDocsBundle\Event\SheetRangeClearedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\SheetRowsAppendedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\SheetTabAddedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\SheetTabDeletedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\SheetTabRenamedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\SheetValuesUpdatedEvent;
 use Google\Service\Sheets;
+use Google\Service\Sheets\AddSheetRequest;
+use Google\Service\Sheets\BatchUpdateSpreadsheetRequest;
 use Google\Service\Sheets\BatchUpdateValuesRequest;
 use Google\Service\Sheets\ClearValuesRequest;
+use Google\Service\Sheets\DeleteSheetRequest;
+use Google\Service\Sheets\UpdateSheetPropertiesRequest;
+use Google\Service\Sheets\Request as SheetsRequest;
+use Google\Service\Sheets\SheetProperties;
 use Google\Service\Sheets\ValueRange;
 use Psr\EventDispatcher\EventDispatcherInterface;
 
@@ -282,6 +291,169 @@ class SpreadsheetService
         $this->sheets->spreadsheets_values->clear($fileId, $range, new ClearValuesRequest());
 
         $this->dispatch(new SheetRangeClearedEvent($fileId, $range));
+    }
+
+    /**
+     * Start a formatting pass. Nothing is sent until apply(), which puts the whole pass in
+     * one request — see SheetFormatter.
+     */
+    public function format(string $fileId): SheetFormatter
+    {
+        return new SheetFormatter($this->sheets, $this->drive, $fileId, $this->dispatcher);
+    }
+
+    /**
+     * Add a tab and return the numeric sheet id Google gave it.
+     *
+     * Keep that id if the next thing you do is style what you just created: Google's
+     * formatting calls take the id, not the title.
+     */
+    public function addTab(string $fileId, string $title): int
+    {
+        $this->drive->assertAccess($fileId);
+
+        $add = new AddSheetRequest();
+        $add->setProperties(new SheetProperties(['title' => $title]));
+
+        $request = new SheetsRequest();
+        $request->setAddSheet($add);
+
+        $batch = new BatchUpdateSpreadsheetRequest();
+        $batch->setRequests([$request]);
+
+        $response = $this->sheets->spreadsheets->batchUpdate($fileId, $batch);
+
+        $properties = ($response->getReplies()[0] ?? null)?->getAddSheet()?->getProperties();
+        $sheetId    = $properties?->getSheetId();
+
+        if ($sheetId === null) {
+            throw new \RuntimeException(sprintf(
+                'Google did not report the id of the tab "%s" it just added.',
+                $title
+            ));
+        }
+
+        $this->dispatch(new SheetTabAddedEvent($fileId, $title, $sheetId));
+
+        return $sheetId;
+    }
+
+    /**
+     * Rename a tab. Its numeric sheet id does not change, so anything holding that id — a
+     * formula in another tab, a chart — keeps working.
+     */
+    public function renameTab(string $fileId, string $from, string $to): void
+    {
+        $this->drive->assertAccess($fileId);
+
+        $tabs    = $this->tabIds($fileId);
+        $sheetId = $this->tabId($tabs, $from);
+
+        if ($from !== $to && array_key_exists($to, $tabs)) {
+            throw new \InvalidArgumentException(sprintf(
+                'This spreadsheet already has a tab called "%s"; Google will not allow two.',
+                $to
+            ));
+        }
+
+        $properties = new SheetProperties();
+        $properties->setSheetId($sheetId);
+        $properties->setTitle($to);
+
+        $update = new UpdateSheetPropertiesRequest();
+        $update->setProperties($properties);
+        $update->setFields('title');
+
+        $request = new SheetsRequest();
+        $request->setUpdateSheetProperties($update);
+
+        $this->sendOne($fileId, $request);
+
+        $this->dispatch(new SheetTabRenamedEvent($fileId, $from, $to, $sheetId));
+    }
+
+    /**
+     * Delete a tab and everything on it.
+     *
+     * There is no trash for a tab: the only way back is the spreadsheet's own version
+     * history in Google, so treat this the way you would treat deleteForever(). The
+     * SheetTabDeletedEvent it dispatches is what an audit trail will have to rely on.
+     *
+     * Refuses the last remaining tab, which a spreadsheet must always keep.
+     */
+    public function deleteTab(string $fileId, string $title): void
+    {
+        $this->drive->assertAccess($fileId);
+
+        $tabs    = $this->tabIds($fileId);
+        $sheetId = $this->tabId($tabs, $title);
+
+        if (count($tabs) === 1) {
+            throw new \InvalidArgumentException(sprintf(
+                'A spreadsheet must keep at least one tab, and "%s" is the only tab here.',
+                $title
+            ));
+        }
+
+        $delete = new DeleteSheetRequest();
+        $delete->setSheetId($sheetId);
+
+        $request = new SheetsRequest();
+        $request->setDeleteSheet($delete);
+
+        $this->sendOne($fileId, $request);
+
+        $this->dispatch(new SheetTabDeletedEvent($fileId, $title, $sheetId));
+    }
+
+    /**
+     * Tab title to numeric sheet id.
+     *
+     * @return array<string, int>
+     */
+    private function tabIds(string $fileId): array
+    {
+        $spreadsheet = $this->sheets->spreadsheets->get($fileId, [
+            'fields' => 'sheets.properties(title,sheetId)',
+        ]);
+
+        $ids = [];
+
+        foreach ($spreadsheet->getSheets() as $sheet) {
+            $properties = $sheet->getProperties();
+
+            if ($properties === null || $properties->getTitle() === null || $properties->getSheetId() === null) {
+                continue;
+            }
+
+            $ids[$properties->getTitle()] = $properties->getSheetId();
+        }
+
+        return $ids;
+    }
+
+    /**
+     * @param array<string, int> $tabs
+     */
+    private function tabId(array $tabs, string $title): int
+    {
+        if (!array_key_exists($title, $tabs)) {
+            throw new \InvalidArgumentException(sprintf(
+                'This spreadsheet has no tab called "%s". Known tabs: %s.',
+                $title,
+                implode(', ', array_keys($tabs)) ?: 'none'
+            ));
+        }
+
+        return $tabs[$title];
+    }
+
+    private function sendOne(string $fileId, SheetsRequest $request): void
+    {
+        $batch = new BatchUpdateSpreadsheetRequest();
+        $batch->setRequests([$request]);
+
+        $this->sheets->spreadsheets->batchUpdate($fileId, $batch);
     }
 
     /**

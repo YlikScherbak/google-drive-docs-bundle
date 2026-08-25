@@ -30,6 +30,8 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Export** to XLSX, CSV, PDF, DOCX and more, streamed straight to the browser
 - **Import** an `.xlsx`/`.csv`/`.docx` upload and have Google convert it into an editable document
 - **Read and write the cells** of a Google Sheet, so a template can be filled with your own data
+- **Format what you generated** — headers, borders, number formats, conditional rules,
+  dropdowns, filters, protected formula columns
 - **Trash and restore** items, browse the trash, or erase for good — accidental deletions stay recoverable
 - **Embed the native Google editor** via the `webViewLink` of each document
 - **Manage sharing**: list, grant and revoke access per file or folder (`reader` / `commenter` / `writer`), for individual users or **Google groups**
@@ -413,8 +415,95 @@ SpreadsheetService::range('My Sheet', 'A1');     // 'My Sheet'!A1
 SpreadsheetService::range("Bob's", 'A1');        // 'Bob''s'!A1
 ```
 
-Formatting — colours, number formats, conditional rules, adding or removing tabs, frozen rows —
-is Sheets' `spreadsheets.batchUpdate`, which this service does not cover yet.
+### Formatting
+
+Filling a template with data leaves it looking raw: no bold header, no thousands separators, no
+column wide enough to read. `format()` collects the whole styling pass and sends it as **one**
+request, so either all of it lands or none does:
+
+```php
+$this->sheets->format($fileId)
+    ->style('Q3!A1:D1', bold: true, background: '#DDE6EC', horizontalAlign: 'CENTER')
+    ->freeze('Q3', rows: 1)
+    ->numberFormat('Q3!D2:D', '#,##0.00')
+    ->columnWidth('Q3!A:A', 240)
+    ->autoResizeColumns('Q3')
+    ->merge('Q3!A1:D1')
+    ->apply();
+
+$sheetId = $this->sheets->addTab($fileId, 'Summary');   // returns Google's numeric id
+```
+
+| Method | Changes |
+|---|---|
+| `style()` | `bold`, `italic`, `fontSize`, `color`, `background`, `horizontalAlign`, `wrapped` |
+| `numberFormat()` | a Google pattern: `#,##0.00`, `0%`, `dd.MM.yyyy` |
+| `borders()` | lines around a block, and optionally the grid inside it |
+| `bandedRows()` | alternating row colours, which is what makes a long table readable |
+| `conditionalFormat()` | highlight by rule — negatives in red, overdue dates, a custom formula |
+| `dataValidation()` | constrain what may be typed; `ONE_OF_LIST` is the dropdown case |
+| `basicFilter()` / `clearBasicFilter()` | the filter row, so the reader can sort and filter |
+| `protect()` | lock a range — the formula column — against the people using the sheet |
+| `freeze()` | rows and/or columns kept in view while the rest scrolls |
+| `autoResizeColumns()` | every column of a tab widened to fit, as double-clicking a border does |
+| `columnWidth()` / `rowHeight()` | an exact size in pixels, for when auto-resize gets it wrong |
+| `merge()` / `unmerge()` | a block joined into one cell, a title spanning the table |
+| `hideTab()` / `showTab()` | keep a working tab out of the way without deleting it |
+| `tabColor()` | the colour of the tab itself |
+
+A report that actually looks finished is one pass:
+
+```php
+$this->sheets->format($fileId)
+    ->style('Q3!A1:D1', bold: true, background: '#DDE6EC', horizontalAlign: 'CENTER')
+    ->freeze('Q3', rows: 1)
+    ->borders('Q3!A1:D40', inner: true, color: '#CCCCCC')
+    ->bandedRows('Q3!A2:D40')
+    ->numberFormat('Q3!D2:D', '#,##0.00')
+    ->conditionalFormat('Q3!D2:D', 'NUMBER_LESS', ['0'], background: '#FFD5D5', bold: true)
+    ->dataValidation('Q3!C2:C', 'ONE_OF_LIST', ['New', 'Paid', 'Shipped'])
+    ->basicFilter('Q3!A1:D40')
+    ->protect('Q3!D2:D', description: 'Formulas')
+    ->autoResizeColumns('Q3')
+    ->apply();
+```
+
+Tabs themselves are managed on the service, since they are structural rather than cosmetic:
+
+```php
+$sheetId = $this->sheets->addTab($fileId, 'Summary');   // returns Google's numeric id
+$this->sheets->renameTab($fileId, 'Q3', 'Q4');          // the sheet id does not change
+$this->sheets->deleteTab($fileId, 'Scratch');
+```
+
+`deleteTab()` has no undo — there is no trash for a tab, only the spreadsheet's own version
+history — so treat it the way you treat `deleteForever()`. It refuses the last remaining tab,
+refuses an unknown one, and dispatches `SheetTabDeletedEvent` for the audit trail. `renameTab()`
+refuses a title another tab already holds, rather than letting Google answer 400.
+
+Three things worth knowing:
+
+- **`style()` writes only what you pass it.** Google's `repeatCell` replaces everything the
+  request's field mask covers, so a careless call wipes formatting nobody asked to change. Each
+  call here builds a mask naming exactly the attributes given — pass `bold: true` alone and the
+  background, alignment and number format on those cells survive untouched.
+- **`freeze()` and `autoResizeColumns()` take a tab name, not a range.** A bare `Q3` in A1
+  notation is the *cell* Q3, so a range would be ambiguous precisely where it matters. Everything
+  else takes A1 notation, and the numeric sheet ids Google actually wants are resolved for you
+  with a single lookup at `apply()`.
+- **Colours are `#RRGGBB` or `#RGB`.** Anything else is refused before the request is built,
+  rather than becoming a puzzling Google 400.
+
+`conditionalFormat()` and `dataValidation()` take Google's own condition vocabulary —
+`NUMBER_LESS`, `TEXT_CONTAINS`, `DATE_BEFORE`, `ONE_OF_LIST`, `CUSTOM_FORMULA` and the rest —
+with the values it compares against as strings. The bundle passes them through rather than
+maintaining its own list of what Google currently accepts.
+
+There is no `unprotect()`. Removing a protection means finding the id Google assigned it, which
+is work for whoever is looking at the spreadsheet, not for something generating one.
+
+Still not covered: charts and pivot tables, which are a different order of complexity and rarely
+built programmatically; named ranges; developer metadata; and sorting a range in place.
 
 ## Events
 
@@ -430,6 +519,10 @@ invalidation live in your application instead of in the bundle:
 | `SheetValuesUpdatedEvent` | cells are overwritten | `range`, `rows` |
 | `SheetRowsAppendedEvent` | rows are appended to a tab | `range`, `rows` |
 | `SheetRangeClearedEvent` | a range is emptied | `range` |
+| `SheetFormattedEvent` | a formatting pass is applied | `operations` |
+| `SheetTabAddedEvent` | a tab is added | `title`, `sheetId` |
+| `SheetTabRenamedEvent` | a tab is renamed | `from`, `to`, `sheetId` |
+| `SheetTabDeletedEvent` | a tab and its contents are removed | `title`, `sheetId` |
 | `DocumentRenamedEvent` | an item is renamed | `document` |
 | `DocumentMovedEvent` | an item is moved | `document`, `fromParentId`, `toParentId` |
 | `DocumentTrashedEvent` | an item is moved to the trash | `document` |
