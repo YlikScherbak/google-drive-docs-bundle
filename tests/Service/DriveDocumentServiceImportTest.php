@@ -8,7 +8,6 @@ use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentImportedEvent;
 use Borsche\GoogleDriveDocsBundle\Exception\AccessDeniedException;
-use Borsche\GoogleDriveDocsBundle\Exception\UploadTooLargeException;
 use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Tests\CollectingEventDispatcher;
@@ -184,16 +183,9 @@ final class DriveDocumentServiceImportTest extends TestCase
         $this->service(new FakeViewerContext('viewer@example.com'))->import($path, null, 'folder-9');
     }
 
-    public function testImportRefusesFilesOverGooglesMultipartLimit(): void
-    {
-        // One byte past Google's 5 MB multipart ceiling.
-        $path = $this->tempFile('huge.xlsx', str_repeat('x', DriveDocumentService::MAX_UPLOAD_BYTES + 1));
-        $this->files->expects(self::never())->method('create');
-
-        $this->expectException(UploadTooLargeException::class);
-
-        $this->service()->import($path);
-    }
+    // A file past the multipart ceiling is no longer refused: it goes up with the resumable
+    // protocol instead. That switch, and the application's own optional cap, live in
+    // DriveDocumentServiceResumableTest, which has the client stub the two paths need.
 
     public function testImportRejectsAMissingFile(): void
     {

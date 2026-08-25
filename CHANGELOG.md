@@ -6,6 +6,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `setAppProperties()`, `appProperties()`, `findByAppProperty()` and `findByAppPropertyPage()`
+  store the application's own metadata on an item and search by it, so "the spreadsheet
+  belonging to order 4711" is a question Drive can answer instead of a mapping table you keep.
+  Drive holds `appProperties` privately per OAuth client, so nothing else looking at the drive
+  sees them. Values are stored as strings, a null value removes a key, and every call is a merge
+- `DocumentPropertiesChangedEvent`
+- Resumable upload: `import()` no longer refuses a file over Google's 5 MB multipart ceiling.
+  Under it the file still goes up in one request; past it the bundle switches to Drive's
+  resumable protocol and sends the bytes in chunks, so nothing larger than one chunk is held in
+  memory and Drive's own 5 TB is the only ceiling left
+- `upload.max_bytes` for a policy limit of your own (0, the default, means none) and
+  `upload.chunk_bytes` for the resumable chunk size, which must be a multiple of 256 KB
+- `DriveDocumentService::MULTIPART_LIMIT` and `CHUNK_GRANULARITY`
+
+### Changed
+- **A file over 5 MB is uploaded instead of rejected.** `UploadTooLargeException` now means only
+  that the application's own `upload.max_bytes` was exceeded — code catching it to tell users
+  "too big for the integration" should either set that option or stop expecting the exception
+- `search()` and the new property search share one query-escaping helper, so both treat a quote
+  or a backslash in the term the same way
+
+### Deprecated
+- `DriveDocumentService::MAX_UPLOAD_BYTES`, which no longer describes the largest upload. Use
+  `MULTIPART_LIMIT` for the point where the two upload paths part, or the `upload.max_bytes`
+  option for a limit of your own
+
+### Notes
+- The resumable path has to put the Google client into deferred mode, which is global to the
+  client: leaving it on would turn every later call anywhere in the application into a request
+  object instead of a result. It is restored in a `finally`, and there is a test that a failure
+  mid-upload still restores it
+- What is tested here is the part this bundle owns: which path a size takes, that the client
+  state is put back, the chunk-size rule and the application cap. The byte-level chunk protocol
+  is Google's own `MediaFileUpload` and is exercised for real rather than mocked in detail
+
 ## [0.6.0] - 2026-08-25
 
 ### Added

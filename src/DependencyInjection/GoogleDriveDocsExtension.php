@@ -66,6 +66,8 @@ class GoogleDriveDocsExtension extends Extension
                 ? new Reference($config['permission_cache']['pool'], ContainerInterface::NULL_ON_INVALID_REFERENCE)
                 : null,
             $config['permission_cache']['ttl'],
+            $config['upload']['max_bytes'],
+            $config['upload']['chunk_bytes'],
         ]);
 
         // Checked after every bundle registered its services (see ValidateCachePoolPass).

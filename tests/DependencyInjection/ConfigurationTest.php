@@ -23,6 +23,8 @@ final class ConfigurationTest extends TestCase
         self::assertSame(GoogleClientFactory::DEFAULT_RETRY_ATTEMPTS, $config['retry']['attempts']);
         self::assertSame(GoogleClientFactory::DEFAULT_INITIAL_DELAY, $config['retry']['initial_delay']);
         self::assertSame(GoogleClientFactory::DEFAULT_MAX_DELAY, $config['retry']['max_delay']);
+        self::assertSame(0, $config['upload']['max_bytes']);
+        self::assertSame(8 * 1024 * 1024, $config['upload']['chunk_bytes']);
     }
 
     public function testRetryCanBeTunedAndDisabled(): void
@@ -34,6 +36,23 @@ final class ConfigurationTest extends TestCase
         self::assertSame(0, $config['retry']['attempts']);
         self::assertSame(0.5, $config['retry']['initial_delay']);
         self::assertSame(5.0, $config['retry']['max_delay']);
+    }
+
+    public function testUploadLimitsCanBeTuned(): void
+    {
+        $config = (new Processor())->processConfiguration(new Configuration(), [[
+            'upload' => ['max_bytes' => 104857600, 'chunk_bytes' => 262144],
+        ]]);
+
+        self::assertSame(104857600, $config['upload']['max_bytes']);
+        self::assertSame(262144, $config['upload']['chunk_bytes']);
+    }
+
+    public function testAChunkSmallerThanGooglesGranularityIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        (new Processor())->processConfiguration(new Configuration(), [['upload' => ['chunk_bytes' => 1024]]]);
     }
 
     public function testNegativeRetryAttemptsAreRejected(): void

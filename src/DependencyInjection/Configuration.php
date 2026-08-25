@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\GoogleDriveDocsBundle\DependencyInjection;
 
 use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
+use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
@@ -53,6 +54,22 @@ class Configuration implements ConfigurationInterface
                             ->defaultValue(300)
                             ->min(0)
                             ->info('Lifetime in seconds. Keep it short: sharing may also change directly in Google. 0 keeps lookups out of the pool (per-request caching only).')
+                        ->end()
+                    ->end()
+                ->end()
+                ->arrayNode('upload')
+                    ->info('Limits and chunking for import().')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->integerNode('max_bytes')
+                            ->defaultValue(0)
+                            ->min(0)
+                            ->info('A ceiling of your own in bytes. 0 leaves Drive\'s own 5 TB as the only one.')
+                        ->end()
+                        ->integerNode('chunk_bytes')
+                            ->defaultValue(8 * 1024 * 1024)
+                            ->min(DriveDocumentService::CHUNK_GRANULARITY)
+                            ->info('Bytes per resumable chunk; must be a multiple of 256 KB.')
                         ->end()
                     ->end()
                 ->end()

@@ -28,7 +28,10 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Create / rename / move** documents and folders
 - **Duplicate documents and instantiate templates** — formulas, sheets and formatting come along
 - **Export** to XLSX, CSV, PDF, DOCX and more, streamed straight to the browser
-- **Import** an `.xlsx`/`.csv`/`.docx` upload and have Google convert it into an editable document
+- **Import** an `.xlsx`/`.csv`/`.docx` upload of any size and have Google convert it into an
+  editable document
+- **Link documents to your own records** — store the order or contract id on the file and
+  search by it
 - **Read and write the cells** of a Google Sheet, so a template can be filled with your own data
 - **Format what you generated** — headers, borders, number formats, conditional rules,
   dropdowns, filters, protected formula columns
@@ -124,6 +127,11 @@ google_drive_docs:
     permission_cache:
         pool: 'cache.app'
         ttl: 300
+
+    # Optional. Limits and chunking for import().
+    upload:
+        max_bytes: 0            # a ceiling of your own; 0 leaves Drive's 5 TB as the only one
+        chunk_bytes: 8388608    # bytes per resumable chunk, a multiple of 256 KB
 
     # Optional. Exponential backoff on rate limits and transient Google faults.
     retry:
@@ -523,6 +531,7 @@ invalidation live in your application instead of in the bundle:
 | `SheetTabAddedEvent` | a tab is added | `title`, `sheetId` |
 | `SheetTabRenamedEvent` | a tab is renamed | `from`, `to`, `sheetId` |
 | `SheetTabDeletedEvent` | a tab and its contents are removed | `title`, `sheetId` |
+| `DocumentPropertiesChangedEvent` | the application's metadata on an item changes | `properties` |
 | `DocumentRenamedEvent` | an item is renamed | `document` |
 | `DocumentMovedEvent` | an item is moved | `document`, `fromParentId`, `toParentId` |
 | `DocumentTrashedEvent` | an item is moved to the trash | `document` |
@@ -694,11 +703,45 @@ $sheet->webViewLink;  // already editable in the embedded editor
   decide yourself, and read `originalFilename` off `DocumentImportedEvent` for the audit trail.
 - **`convert: false` stores the uploaded file untouched**, which is what you want for a PDF
   attachment rather than an editable document.
-- **A single upload is capped at 5 MB.** That is the limit of Google's multipart upload, the
-  one-request form this bundle uses; beyond it Drive requires its resumable protocol, which is
-  not implemented yet. Larger files raise `UploadTooLargeException` instead of failing obscurely.
+- **Size is no longer a limit.** Under Google's 5 MB multipart ceiling the file goes up in one
+  request; past it the bundle switches to Drive's resumable protocol and sends the bytes in
+  chunks, so nothing larger than one chunk is ever held in memory. Drive's own ceiling — 5 TB —
+  is what is left. Set `upload.max_bytes` if you want a policy limit of your own; going over it
+  raises `UploadTooLargeException` before anything is read.
 - **A stored-as-is file stays invisible to `listFolder()`** unless its MIME type is listed in
   `document_mime_types` — add `application/pdf` there if you import PDFs and want them shown.
+
+## Linking documents to your own records
+
+Documents are created by the service user and identified by an opaque Drive id, which leaves the
+application to remember which id belongs to which order, contract or customer. Drive can hold
+that itself:
+
+```php
+$this->drive->setAppProperties($doc->id, ['orderId' => $order->getId()]);
+
+$this->drive->appProperties($doc->id);                     // ['orderId' => '4711']
+$this->drive->findByAppProperty('orderId', '4711');        // DriveDocument[]
+$this->drive->findByAppPropertyPage('orderId', '4711');    // one page of them
+```
+
+That removes the mapping table a lot of integrations end up keeping. Four things to know:
+
+- **These properties are private to this application.** Drive keeps `appProperties` per OAuth
+  client, so nothing else looking at the same drive — another integration, the Drive UI — sees
+  them.
+- **Everything is stored as a string.** An int comes back as its decimal text, a bool as `"1"` or
+  `""`. Compare accordingly; `setAppProperties()` converts for you rather than letting a silent
+  cast surprise you later.
+- **A null value removes the key**, which is how Drive itself expresses a deletion. Keys you do
+  not mention are left alone — every call is a merge, never a replace.
+- **They are not part of `DriveDocument`.** A listing would carry them on every row for the sake
+  of the few callers that look, so reading them is an explicit call. Same reasoning as
+  `roleOf()`.
+
+Google caps a property at 124 bytes for key and value together, and 100 properties per item.
+Those limits stay enforced by Google rather than mirrored here, so a change on their side does
+not need a release on this one.
 
 ## Exporting
 

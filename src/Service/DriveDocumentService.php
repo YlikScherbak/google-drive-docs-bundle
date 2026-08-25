@@ -12,6 +12,7 @@ use Borsche\GoogleDriveDocsBundle\Event\DocumentCreatedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentDeletedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentImportedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentMovedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\DocumentPropertiesChangedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentRenamedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentRestoredEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentTrashedEvent;
@@ -29,11 +30,13 @@ use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePermission;
 use Google\Service\Drive;
+use Google\Http\MediaFileUpload;
 use Google\Service\Drive\DriveFile;
 use Google\Service\Drive\DriveFileCapabilities;
 use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Exception as GoogleServiceException;
 use Psr\Cache\CacheItemPoolInterface;
+use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
 use Psr\EventDispatcher\EventDispatcherInterface;
@@ -100,8 +103,21 @@ class DriveDocumentService
      */
     private const MAX_PAGES = 1000;
 
-    /** Google's ceiling for a one-request multipart upload. */
-    public const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+    /**
+     * Google's ceiling for a one-request multipart upload. Past this the resumable protocol
+     * takes over, so this is where the two paths part rather than a limit on what can go up.
+     */
+    public const MULTIPART_LIMIT = 5 * 1024 * 1024;
+
+    /**
+     * @deprecated since 0.7.0, the multipart ceiling is no longer the largest upload —
+     *             use MULTIPART_LIMIT for the threshold, or the upload.max_bytes option
+     *             for a limit of your own.
+     */
+    public const MAX_UPLOAD_BYTES = self::MULTIPART_LIMIT;
+
+    /** Resumable chunks must be a multiple of this. */
+    public const CHUNK_GRANULARITY = 256 * 1024;
 
     private const FALLBACK_MIME = 'application/octet-stream';
 
@@ -169,7 +185,18 @@ class DriveDocumentService
         private readonly ?EventDispatcherInterface $dispatcher = null,
         private readonly ?CacheItemPoolInterface $permissionCache = null,
         private readonly int $permissionCacheTtl = 300,
+        /** A cap of your own in bytes; 0 leaves Drive's own 5 TB as the only one. */
+        private readonly int $maxUploadBytes = 0,
+        /** Bytes per resumable chunk. Bigger is fewer round trips and more memory. */
+        private readonly int $chunkBytes = 8 * 1024 * 1024,
     ) {
+        if ($this->chunkBytes <= 0 || $this->chunkBytes % self::CHUNK_GRANULARITY !== 0) {
+            throw new \InvalidArgumentException(sprintf(
+                'A resumable chunk must be a positive multiple of %d bytes, %d given.',
+                self::CHUNK_GRANULARITY,
+                $this->chunkBytes
+            ));
+        }
     }
 
     /**
@@ -270,8 +297,6 @@ class DriveDocumentService
             throw new \InvalidArgumentException(sprintf('Cannot read the file to import: "%s".', $path));
         }
 
-        // Checked twice on purpose: the stat keeps an oversized file out of memory, and the
-        // byte count catches a stat that failed or a file that grew in between.
         $size = filesize($path);
 
         if ($size !== false) {
@@ -282,16 +307,6 @@ class DriveDocumentService
             $this->assertAccess($parentId);
         }
 
-        // Bounded read: when the stat above failed there is nothing else stopping a huge
-        // file from being pulled into memory before the size check below can reject it.
-        $contents = file_get_contents($path, false, null, 0, self::MAX_UPLOAD_BYTES + 1);
-
-        if ($contents === false) {
-            throw new \InvalidArgumentException(sprintf('Could not read the file to import: "%s".', $path));
-        }
-
-        $this->assertUploadSize(strlen($contents));
-
         $filename   = basename($path);
         $extension  = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
         $uploadMime = $mimeType ?? self::UPLOAD_MIMES[$extension] ?? self::FALLBACK_MIME;
@@ -301,17 +316,17 @@ class DriveDocumentService
         $converted = $targetMime !== $uploadMime;
         $name      = $title ?? ($converted ? pathinfo($filename, PATHINFO_FILENAME) : $filename);
 
-        $created = $this->drive->files->create(new DriveFile([
+        $metadata = new DriveFile([
             'name'     => $name,
             'mimeType' => $targetMime,
             'parents'  => [$parentId ?: $this->sharedDriveId],
-        ]), [
-            'data'              => $contents,
-            'mimeType'          => $uploadMime,
-            'uploadType'        => 'multipart',
-            'supportsAllDrives' => true,
-            'fields'            => self::FILE_FIELDS,
         ]);
+
+        // Under Google's multipart ceiling the whole thing goes in one request; past it the
+        // resumable protocol sends the bytes in chunks, so nothing has to be held in memory.
+        $created = $size !== false && $size > self::MULTIPART_LIMIT
+            ? $this->uploadResumable($path, $metadata, $uploadMime, $size)
+            : $this->uploadAtOnce($path, $metadata, $uploadMime);
 
         $document = $this->mapFile($created);
         $this->dispatch(new DocumentImportedEvent($document, $filename, $parentId));
@@ -780,6 +795,104 @@ class DriveDocumentService
     }
 
     /**
+     * The application's own metadata on an item.
+     *
+     * Drive keeps these private to the OAuth client that wrote them, which makes them the
+     * place to record what an item *is* in your domain — the order it belongs to, the contract
+     * it was generated from — without a table of your own mapping ids to file ids.
+     *
+     * Not part of DriveDocument: a listing would carry them on every row for the sake of the
+     * few callers that look, so this is an explicit read.
+     *
+     * @return array<string, string>
+     */
+    public function appProperties(string $fileId): array
+    {
+        $this->assertAccess($fileId);
+
+        $file = $this->drive->files->get($fileId, [
+            'supportsAllDrives' => true,
+            'fields'            => 'id,appProperties',
+        ]);
+
+        /** @var array<string, string>|null $properties */
+        $properties = $file->getAppProperties();
+
+        return $properties ?? [];
+    }
+
+    /**
+     * Merge metadata into an item. Keys not mentioned are left alone; a null value removes
+     * the key, which is how Drive itself expresses a deletion.
+     *
+     * Values are stored as strings — that is all Drive keeps — so an int arrives back as its
+     * decimal text and a bool as "1" or "". Compare accordingly.
+     *
+     * Drive caps a property at 124 bytes for key and value together, and 100 properties per
+     * item. Those limits are Google's and stay enforced by Google: an oversized set comes back
+     * as a Drive error rather than being second-guessed here, so a limit changing on their
+     * side does not need a release on this one.
+     *
+     * Returns nothing on purpose: appProperties are not part of DriveDocument, so handing
+     * one back would show a document that does not carry the change just made. Read them
+     * with appProperties() when you need them.
+     *
+     * @param array<string, string|int|float|bool|null> $properties
+     */
+    public function setAppProperties(string $fileId, array $properties): void
+    {
+        $this->assertAccess($fileId);
+
+        $payload = [];
+
+        foreach ($properties as $key => $value) {
+            if (trim((string) $key) === '') {
+                throw new \InvalidArgumentException('A property key cannot be empty.');
+            }
+
+            $payload[(string) $key] = $value === null ? null : (string) $value;
+        }
+
+        if ($payload === []) {
+            return;
+        }
+
+        $this->drive->files->update($fileId, new DriveFile(['appProperties' => $payload]), [
+            'supportsAllDrives' => true,
+            'fields'            => 'id',
+        ]);
+
+        $this->dispatch(new DocumentPropertiesChangedEvent($fileId, $payload));
+    }
+
+    /**
+     * Every item carrying the given metadata, filtered for the current viewer.
+     *
+     * This is the other half of setAppProperties(): ask Drive for "the spreadsheet belonging
+     * to order 4711" instead of keeping that mapping yourself.
+     *
+     * @return DriveDocument[]
+     */
+    public function findByAppProperty(string $key, string $value): array
+    {
+        [$q, $filter] = $this->propertyCriteria($key, $value);
+
+        return $this->queryAll($q, $filter);
+    }
+
+    /** One page of findByAppProperty(). */
+    public function findByAppPropertyPage(
+        string $key,
+        string $value,
+        ?string $pageToken = null,
+        int $pageSize = self::DEFAULT_PAGE_SIZE
+    ): DrivePage {
+        [$q, $filter] = $this->propertyCriteria($key, $value);
+
+        return $this->queryPage($q, $filter, $pageToken, $pageSize);
+    }
+
+    /**
      * The role the current viewer effectively holds on an item, or null when they hold none.
      *
      * Reports, it does not enforce: canAccess() still passes anyone with any grant, and the
@@ -893,12 +1006,42 @@ class DriveDocumentService
             return null;
         }
 
-        $escaped = str_replace(['\\', "'"], ['\\\\', "\\'"], $name);
+        $escaped = $this->escapeQueryValue($name);
 
         return [
             sprintf("%s and name contains '%s' and trashed=false", $this->typeFilter(), $escaped),
             !$this->viewerContext->seesEverything(),
         ];
+    }
+
+    /**
+     * Key and value are interpolated into the Drive query, so both are escaped.
+     *
+     * @return array{0: string, 1: bool}
+     */
+    private function propertyCriteria(string $key, string $value): array
+    {
+        $this->assertConfigured();
+
+        if (trim($key) === '') {
+            throw new \InvalidArgumentException('A property key cannot be empty.');
+        }
+
+        return [
+            sprintf(
+                "%s and appProperties has { key='%s' and value='%s' } and trashed=false",
+                $this->typeFilter(),
+                $this->escapeQueryValue($key),
+                $this->escapeQueryValue($value)
+            ),
+            !$this->viewerContext->seesEverything(),
+        ];
+    }
+
+    /** Backslashes and quotes, the two characters that can end a Drive query early. */
+    private function escapeQueryValue(string $value): string
+    {
+        return str_replace(['\\', "'"], ['\\\\', "\\'"], $value);
     }
 
     /**
@@ -1354,18 +1497,116 @@ class DriveDocumentService
         }
     }
 
+    /** One request, for a file small enough that holding it in memory is fine. */
+    private function uploadAtOnce(string $path, DriveFile $metadata, string $uploadMime): DriveFile
+    {
+        // Bounded read: a stat that failed above must not let an arbitrarily large file through.
+        $contents = file_get_contents($path, false, null, 0, self::MULTIPART_LIMIT + 1);
+
+        if ($contents === false) {
+            throw new \InvalidArgumentException(sprintf('Could not read the file to import: "%s".', $path));
+        }
+
+        if (strlen($contents) > self::MULTIPART_LIMIT) {
+            // Only reachable when filesize() failed or the file grew; chunk it instead.
+            return $this->uploadResumable($path, $metadata, $uploadMime, strlen($contents));
+        }
+
+        return $this->drive->files->create($metadata, [
+            'data'              => $contents,
+            'mimeType'          => $uploadMime,
+            'uploadType'        => 'multipart',
+            'supportsAllDrives' => true,
+            'fields'            => self::FILE_FIELDS,
+        ]);
+    }
+
     /**
+     * Drive's resumable protocol: open a session, then send the bytes a chunk at a time.
+     *
+     * The client has to be told to hand back the request instead of running it, and that flag
+     * is global to the client — leaving it on would turn every later call anywhere in the
+     * application into a Request object instead of a result. Hence the finally.
+     */
+    private function uploadResumable(string $path, DriveFile $metadata, string $uploadMime, int $size): DriveFile
+    {
+        $client = $this->drive->getClient();
+        $handle = false;
+
+        $client->setDefer(true);
+
+        try {
+            // While the client is deferred this hands back the request instead of running
+            // it. The generated signature of files->create() says DriveFile and cannot say
+            // that, so the type is checked rather than asserted: were the flag somehow not
+            // in effect, MediaFileUpload would fail much further from the cause.
+            /** @var mixed $deferred */
+            $deferred = $this->drive->files->create($metadata, [
+                'supportsAllDrives' => true,
+                'fields'            => self::FILE_FIELDS,
+            ]);
+
+            if (!$deferred instanceof RequestInterface) {
+                throw new \LogicException(sprintf(
+                    'The Google client was asked to defer the upload but answered with %s '
+                    . 'instead of a request, so the resumable upload cannot start.',
+                    get_debug_type($deferred)
+                ));
+            }
+
+            $media = new MediaFileUpload($client, $deferred, $uploadMime, '', true, $this->chunkBytes);
+            $media->setFileSize($size);
+
+            $handle = fopen($path, 'rb');
+
+            if ($handle === false) {
+                throw new \InvalidArgumentException(sprintf('Could not open the file to import: "%s".', $path));
+            }
+
+            $status = false;
+
+            while ($status === false && !feof($handle)) {
+                $chunk = fread($handle, $this->chunkBytes);
+
+                if ($chunk === false) {
+                    throw new UnexpectedDriveStateException(sprintf(
+                        'Reading "%s" stopped part way through the upload.',
+                        $path
+                    ));
+                }
+
+                $status = $media->nextChunk($chunk);
+            }
+
+            if (!$status instanceof DriveFile) {
+                throw new UnexpectedDriveStateException(sprintf(
+                    'The upload of "%s" ended without Google describing the file it created.',
+                    basename($path)
+                ));
+            }
+
+            return $status;
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+
+            $client->setDefer(false);
+        }
+    }
+
+    /**
+     * The application's own ceiling, when it set one. Drive itself takes files up to 5 TB.
+     *
      * @throws UploadTooLargeException
      */
     private function assertUploadSize(int $bytes): void
     {
-        if ($bytes > self::MAX_UPLOAD_BYTES) {
+        if ($this->maxUploadBytes > 0 && $bytes > $this->maxUploadBytes) {
             throw new UploadTooLargeException(sprintf(
-                'This file is %d bytes, and a single Drive upload takes at most %d. Google needs its '
-                . 'resumable protocol beyond that, which this bundle does not implement yet — add the '
-                . 'file through Google Drive itself, or split it.',
+                'This file is %d bytes and this application accepts at most %d.',
                 $bytes,
-                self::MAX_UPLOAD_BYTES
+                $this->maxUploadBytes
             ));
         }
     }

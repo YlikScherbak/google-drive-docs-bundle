@@ -70,6 +70,20 @@ final class GoogleDriveDocsExtensionTest extends TestCase
         self::assertSame(DriveDocumentService::class, (string) $arguments[1]);
     }
 
+    public function testUploadSettingsReachTheService(): void
+    {
+        $container = new ContainerBuilder();
+
+        (new GoogleDriveDocsExtension())->load([[
+            'upload' => ['max_bytes' => 104857600, 'chunk_bytes' => 524288],
+        ]], $container);
+
+        $arguments = $container->getDefinition(DriveDocumentService::class)->getArguments();
+
+        self::assertSame(104857600, $arguments[8]);
+        self::assertSame(524288, $arguments[9]);
+    }
+
     public function testRetrySettingsReachTheClientFactory(): void
     {
         $container = new ContainerBuilder();
