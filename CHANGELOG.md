@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-08-26
+
 ### Documentation
 - **Adding a second voter for the `DRIVE_*` attributes does not make the policy stricter, and the
   README had been inviting exactly that.** Symfony's default decision strategy is `affirmative`, so
@@ -618,7 +620,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.7...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.4...v1.0.5
