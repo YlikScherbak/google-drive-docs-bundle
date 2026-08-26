@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **Adding a second voter for the `DRIVE_*` attributes does not make the policy stricter, and the
+  README had been inviting exactly that.** Symfony's default decision strategy is `affirmative`, so
+  one granting voter is enough: a stricter voter of yours votes DENY, this bundle's votes GRANT, and
+  access is allowed — whichever order they are registered in. Measured against Symfony's own
+  `AccessDecisionManager` and written down as a table, together with what to do instead (replace the
+  service definition, keeping one voter on those attributes) and why switching the whole application
+  to `unanimous` is the wider change. The worked example was checked against the abstract `Voter` it
+  extends, since `DriveVoter` is `final` and the obvious advice — subclass it — does not compile
+- **`seesEverything()` grants all four attributes, including `DRIVE_DELETE`.** That was stated, but
+  in a sentence easy to read past, and the name invites wiring it to a read-only role: an auditor or
+  a support agent who should see the whole drive is the case where it looks harmless. It is a full
+  bypass of these checks, not a visibility flag, and the README now says so where the decision is
+  made, with the read-everything-change-nothing alternative
+
 ## [1.0.7] - 2026-08-26
 
 ### Added

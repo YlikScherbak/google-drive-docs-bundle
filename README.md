@@ -329,14 +329,96 @@ Install `symfony/security-core` and the voter registers itself. Four attributes 
 `DRIVE_VIEW` asks whether the item is reachable at all; the other three ask for `writer` or
 stronger. They share one rule today and are separate anyway, so an application can pull them apart
 — a stricter rule for sharing, say — without touching the call sites that already say what they
-mean. A viewer whose `seesEverything()` is true is granted everything, because they have no role
-to read and the call would succeed regardless.
+mean. A viewer whose `seesEverything()` is true is granted everything — see below, because that one
+is easy to wire to the wrong role.
 
 **There is deliberately no `enforce_roles` option inside the service.** Which role an operation
 should require is genuinely arguable: Google itself wants `organizer` for some sharing changes and
 `writer` for others, depending on how the drive is set up. A matrix baked into a library is a wrong
-answer nobody reviews; a voter is one you can read, override and test. Replace `DriveVoter` with
-your own and nothing else changes.
+answer nobody reviews; a voter is one you can read, replace and test.
+
+### Replacing the rule — read this before you write your own voter
+
+**Do not add a second voter for the `DRIVE_*` attributes.** Symfony's default decision strategy is
+`affirmative`, which means one granting voter is enough: a stricter voter of yours would vote DENY,
+this bundle's would vote GRANT, and access would be **allowed**. The registration order makes no
+difference. Measured with Symfony's own `AccessDecisionManager`:
+
+| voters                                     | strategy    | outcome     |
+| ------------------------------------------ | ----------- | ----------- |
+| bundle grants, yours denies                | affirmative | **allowed** |
+| yours denies, bundle grants (order flipped) | affirmative | **allowed** |
+| bundle grants, yours denies                | unanimous   | refused     |
+
+So a stricter policy added that way is silently not applied. Replace the service instead, keeping
+one voter on those attributes:
+
+```yaml
+# config/services.yaml
+services:
+    Borsche\GoogleDriveDocsBundle\Security\DriveVoter:
+        class: App\Security\AppDriveVoter
+        arguments:
+            - '@Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService'
+            - '@Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface'
+        tags: [ 'security.voter' ]
+```
+
+`DriveVoter` is `final`, so your class is its own voter rather than a subclass — extend Symfony's
+`Voter` and reuse the attribute names, which are public constants:
+
+```php
+final class AppDriveVoter extends Voter
+{
+    private const ATTRIBUTES = [
+        DriveVoter::VIEW, DriveVoter::EDIT, DriveVoter::SHARE, DriveVoter::DELETE,
+    ];
+
+    public function __construct(
+        private readonly DriveDocumentService $drive,
+        private readonly ViewerContextInterface $viewerContext,
+    ) {
+    }
+
+    protected function supports(string $attribute, mixed $subject): bool
+    {
+        return in_array($attribute, self::ATTRIBUTES, true)
+            && ($subject instanceof DriveDocument || (is_string($subject) && $subject !== ''));
+    }
+
+    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token): bool
+    {
+        $fileId = $subject instanceof DriveDocument ? $subject->id : $subject;
+        $role   = $this->drive->roleOf($fileId);
+
+        // Your matrix. This one wants an organizer to share, a writer to do the rest.
+        return match ($attribute) {
+            DriveVoter::VIEW   => $this->drive->canAccess($fileId),
+            DriveVoter::SHARE  => in_array($role, ['organizer', 'owner'], true),
+            default            => in_array($role, ['writer', 'fileOrganizer', 'organizer', 'owner'], true),
+        };
+    }
+}
+```
+
+`roleOf()` and `canAccess()` are the facts; the matrix above is the policy, and it is yours.
+
+Switching the whole application to `unanimous` also works, but it changes every authorization
+decision you have, not only these four, and any voter that abstains-as-deny elsewhere will start
+refusing things. Replacing the service is the narrower fix.
+
+### `seesEverything()` grants all four attributes
+
+A viewer whose `seesEverything()` returns true is granted `DRIVE_VIEW`, `DRIVE_EDIT`, `DRIVE_SHARE`
+and `DRIVE_DELETE` — they have no role for the bundle to read, and the call would succeed as the
+service user regardless.
+
+**So do not wire it to a read-only role.** The name says "sees", and an auditor or a support agent
+who should read the whole drive is exactly the case where it reads as harmless — but
+`seesEverything()` is a full bypass of these checks, not a visibility flag. It belongs to the roles
+you would let delete a document. For read-everything-change-nothing, leave `seesEverything()` false
+and grant the account `reader` on the drive in Google instead, or replace the voter as above so the
+bypass applies only to `DRIVE_VIEW`.
 
 ## Documents as controller arguments
 
