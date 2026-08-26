@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-08-26
+
 ### Changed
 - **The Google client is built lazily.** Authenticating asks Google for an access token, and that
   happened while the client was being constructed — so every request to a controller holding
@@ -642,7 +644,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.8...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.9...HEAD
+[1.0.9]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.5...v1.0.6
