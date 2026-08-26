@@ -20,6 +20,18 @@ Spreadsheets with working formulas are hard to rebuild. You can either:
 
 This bundle implements the second option: file management, folder navigation, sharing and per-user visibility are handled by your app; editing is handled by Google's own editor embedded in an `iframe`.
 
+> **On that iframe.** Google does not document whether an editor URL may be framed from another
+> origin, so it is worth saying what was actually measured rather than what the docs promise. A
+> Sheet's `webViewLink` was framed from a different origin over plain HTTP in Chrome: the full
+> editor rendered, the frame's `load` event fired, and no `X-Frame-Options` or `frame-ancestors`
+> refusal appeared in the console. `/preview` frames as well.
+>
+> Two caveats worth having in writing. It rests on undocumented behaviour, so treat it as
+> something to re-check rather than as a guarantee. And the check was Chrome only — if Safari or
+> Firefox matter to you, frame one document there before you build a product on it. Note also that
+> `docs.google.com/spreadsheets/` — the marketing root, not a document — *does* answer with
+> `X-Frame-Options: SAMEORIGIN`, so a headers-only check on the wrong URL concludes the opposite.
+
 ## Features
 
 - **Browse** the Shared Drive: folders and documents, folder-first ordering
@@ -50,6 +62,37 @@ This bundle implements the second option: file management, folder navigation, sh
 - **PSR-14 events** on every write, so auditing and notifications stay in your application
 - **`is_granted()` on drive items**, and documents resolved straight into controller arguments
 - **Several Shared Drives** from one service
+
+## Two things to settle before a multi-user deployment
+
+Both are deliberate and both are documented at length further down, but they are easy to skim past,
+and skimming past them gives you a back office where every user can reach every document.
+
+**1. Visibility is opt-in.** The default `ViewerContextInterface` is `AllowAllViewerContext`, and it
+answers `seesEverything(): true` — which is correct for a single-tenant back office or a CLI, and
+wrong for anything with more than one kind of user. The bundle logs a container message while that
+default is still in place, but a line in the build log is not a safeguard. Implement the interface
+before you ship: [Per-user visibility](#per-user-visibility).
+
+**2. The bundle reports; it does not enforce.** Every call runs as the Google service user, whatever
+the viewer holds. `canAccess()` answers "may this viewer reach this item at all", and `roleOf()`
+answers "what role do they hold" — neither refuses an operation. So a viewer with `reader` who
+reaches a controller calling `trash()` will trash the document, because your controller let them.
+
+Guard the mutating endpoints yourself. The bundle ships the voter for it:
+
+```php
+#[IsGranted(DriveVoter::EDIT, subject: 'document')]
+public function rename(DriveDocument $document, Request $request): Response
+{
+    // DRIVE_EDIT is writer or stronger; DRIVE_SHARE and DRIVE_DELETE are separate on purpose
+}
+```
+
+Why a voter rather than an `enforce_roles: true` switch is argued in
+[Deciding access with `is_granted()`](#deciding-access-with-is_granted) — briefly, which role a given
+operation should require is genuinely arguable, and a matrix baked into a library is a wrong answer
+nobody reviews.
 
 ## Requirements
 

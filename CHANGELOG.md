@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- The iframe the README is built around is now backed by a measurement rather than a promise: a
+  document's `webViewLink` was framed from another origin over plain HTTP in Chrome, the editor
+  rendered, and no `X-Frame-Options` or `frame-ancestors` refusal appeared. Written down with its
+  two caveats — the behaviour is undocumented by Google, and only Chrome was checked. Also noted
+  that `docs.google.com/spreadsheets/`, the marketing root rather than a document, *does* answer
+  `X-Frame-Options: SAMEORIGIN`, so a headers-only check on the wrong URL concludes the opposite
+- The two things that decide whether a multi-user deployment is safe — that visibility is opt-in
+  behind `ViewerContextInterface`, and that the bundle reports rather than enforces — were a
+  paragraph each in the middle of the README. They are now a section of their own near the top,
+  where someone evaluating the bundle will actually meet them
+
 ## [1.0.4] - 2026-08-26
 
 ### Fixed
