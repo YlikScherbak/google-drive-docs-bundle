@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-08-26
+
 ### Fixed
 - **`setExpiry()` never worked.** Drive refuses a `permissions.update` whose body carries no role —
   400, "The permission role field is required" — however little of the grant is being changed, so
@@ -546,7 +548,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.0...v1.0.1
