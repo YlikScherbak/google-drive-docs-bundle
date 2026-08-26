@@ -69,7 +69,17 @@ class Configuration implements ConfigurationInterface
                         ->integerNode('chunk_bytes')
                             ->defaultValue(8 * 1024 * 1024)
                             ->min(DriveDocumentService::CHUNK_GRANULARITY)
+                            ->max(DriveDocumentService::MAX_CHUNK_BYTES)
                             ->info('Bytes per resumable chunk; must be a multiple of 256 KB.')
+                            // The service constructor insists on this too, but it only runs on
+                            // the first import; a container build is where a typo should stop.
+                            ->validate()
+                                ->ifTrue(static fn (int $bytes): bool => $bytes % DriveDocumentService::CHUNK_GRANULARITY !== 0)
+                                ->thenInvalid(sprintf(
+                                    'A resumable chunk must be a multiple of %d bytes, %%s given.',
+                                    DriveDocumentService::CHUNK_GRANULARITY
+                                ))
+                            ->end()
                         ->end()
                     ->end()
                 ->end()

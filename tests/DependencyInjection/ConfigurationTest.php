@@ -6,6 +6,7 @@ namespace Borsche\GoogleDriveDocsBundle\Tests\DependencyInjection;
 
 use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\DependencyInjection\Configuration;
+use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
@@ -53,6 +54,25 @@ final class ConfigurationTest extends TestCase
         $this->expectException(InvalidConfigurationException::class);
 
         (new Processor())->processConfiguration(new Configuration(), [['upload' => ['chunk_bytes' => 1024]]]);
+    }
+
+    public function testAChunkThatIsNotAMultipleOfTheGranularityIsRejected(): void
+    {
+        // Caught here rather than in the service constructor, which would only run on the
+        // first import — long after the container was built.
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessageMatches('/multiple/');
+
+        (new Processor())->processConfiguration(new Configuration(), [['upload' => ['chunk_bytes' => 400000]]]);
+    }
+
+    public function testAChunkTooBigToHoldInMemoryIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        (new Processor())->processConfiguration(new Configuration(), [[
+            'upload' => ['chunk_bytes' => DriveDocumentService::MAX_CHUNK_BYTES + DriveDocumentService::CHUNK_GRANULARITY],
+        ]]);
     }
 
     public function testNegativeRetryAttemptsAreRejected(): void

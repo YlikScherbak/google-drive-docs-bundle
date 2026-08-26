@@ -6,6 +6,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Resumable upload declared the wrong total when a file's stat could not be trusted. A stat
+  answering `false` — or `0`, as a network mount or a stream wrapper can — sent the upload down
+  the multipart path, where the bounded read then handed the resumable fallback the size of what
+  it had read (5 MB) rather than the file's real size. Google measures every chunk against that
+  total and rejected the first one past it. The size now comes from the stream itself, and a
+  stream that can neither stat nor seek is reported as such instead of uploading nonsense
+- `upload.max_bytes` was skipped entirely on that same path: with no trustworthy stat the cap
+  was never applied. Both upload paths now check the bytes they actually handle, so the ceiling
+  holds whatever the filesystem claims
+- A resumable upload whose last chunk was the single byte `0` stalled one byte from done: the
+  Google client tests its chunk argument with a loose comparison, and PHP reads the string `"0"`
+  as false. The loop no longer leaves a single byte for the final chunk — it swallows that byte
+  into the chunk before it, which is what makes that one the last. Shortening a chunk instead
+  would have sent an intermediate one that is not a multiple of 256 KB, breaking the rule
+  `chunk_bytes` itself is validated against; every chunk but the last is now asserted to be a
+  multiple of the granularity
+- `chunk_bytes` is validated where it is configured: a value that is not a multiple of 256 KB
+  used to pass config validation and fail only when the service was first used, far from the
+  cause. It is also capped at the new `MAX_CHUNK_BYTES` (64 MB) — a chunk is read into memory
+  whole, so a gigabyte-sized one is a mistake rather than a tuning choice
+- `roleOf()` no longer stops at the permissions Google embeds in a file, which are not always
+  the whole list: it reads the dedicated lookup as well, so a `writer` grant held through a
+  group is not reported as the weaker `reader` found inline
+- `SpreadsheetService` and `SheetFormatter` tolerate a spreadsheet answer without `sheets`, as
+  `listTabs()` already did; a formatting pass against one now says the answer described no
+  usable tab instead of "no tab called ''"
+- `SheetRange` refuses a range past the edges of the grid, naming it instead of leaving a Drive
+  400 to explain. The bounds are Google's own and deliberately loose: 18 278 columns (A to ZZZ)
+  and the ten million cells a spreadsheet can hold, which is also the most rows any range could
+  name. 16 384 columns and 1 048 576 rows are Excel's grid, and using those would have refused
+  ranges Google accepts
+
+### Added
+- `SheetFormatter::MAX_OPERATIONS` (500): a pass travels as one `batchUpdate`, so the call that
+  overflows it raises an `OverflowException` naming itself. This ceiling is the bundle's own, not
+  a documented Google limit — the same reasoning as `MAX_PAGES` and `MAX_BATCH_RANGES`: a request
+  that grows without bound is a runaway rather than a styling pass
+- `DriveDocumentService::MAX_CHUNK_BYTES`
+
+### Changed
+- The pixel range `columnWidth()` and `rowHeight()` accept is described as this bundle's own
+  policy, which it is, rather than as Google's limit
+- README: `max_bytes: 0` means no limit of your own, the `chunk_bytes` rules, the size of a
+  formatting pass, and that `import()` trusts the path it is given
+
 ## [0.7.0] - 2026-08-25
 
 ### Added

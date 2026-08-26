@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\GoogleDriveDocsBundle\Service;
 
 use Borsche\GoogleDriveDocsBundle\Event\SheetFormattedEvent;
+use Borsche\GoogleDriveDocsBundle\Exception\UnexpectedDriveStateException;
 use Borsche\GoogleDriveDocsBundle\Model\SheetRange;
 use Google\Service\Sheets;
 use Google\Service\Sheets\AddBandingRequest;
@@ -73,6 +74,16 @@ class SheetFormatter
     /** Google rejects a column narrower than this, and a very wide one is a mistake. */
     private const MIN_PIXELS = 1;
     private const MAX_PIXELS = 2000;
+
+    /**
+     * Operations one pass may collect.
+     *
+     * This bundle's own ceiling, not a documented Google one: the whole pass travels as a
+     * single batchUpdate, and a request that grows without bound is a runaway rather than a
+     * styling pass — the same reasoning as MAX_PAGES and MAX_BATCH_RANGES elsewhere. Call
+     * apply() and start another pass if a job genuinely needs more.
+     */
+    public const MAX_OPERATIONS = 500;
 
     /**
      * Pending changes. Each knows the tab it needs and how to become a Request once the
@@ -202,6 +213,8 @@ class SheetFormatter
             return $this;
         }
 
+        $this->assertRoom();
+
         $this->pending[] = [
             'tab'   => $tab,
             'build' => static function (int $sheetId) use ($grid, $fields): Request {
@@ -226,6 +239,8 @@ class SheetFormatter
     /** Widen every column of a tab to fit its content, the way double-clicking a border does. */
     public function autoResizeColumns(string $tab): self
     {
+        $this->assertRoom();
+
         $this->pending[] = [
             'tab'   => $tab,
             'build' => static function (int $sheetId): Request {
@@ -457,6 +472,8 @@ class SheetFormatter
 
     public function clearBasicFilter(string $tab): self
     {
+        $this->assertRoom();
+
         $this->pending[] = [
             'tab'   => $tab,
             'build' => static function (int $sheetId): Request {
@@ -569,6 +586,15 @@ class SheetFormatter
         $this->drive->assertAccess($this->fileId);
 
         $sheetIds = $this->sheetIds();
+
+        if ($sheetIds === []) {
+            throw new UnexpectedDriveStateException(sprintf(
+                'Google described spreadsheet "%s" without a single usable tab, so there is '
+                . 'nothing here to format.',
+                $this->fileId
+            ));
+        }
+
         $first    = array_key_first($sheetIds);
         $requests = [];
 
@@ -627,6 +653,8 @@ class SheetFormatter
     {
         $parsed = SheetRange::fromA1($range);
 
+        $this->assertRoom();
+
         $this->pending[] = [
             'tab'   => $parsed->tab,
             'build' => static function (int $sheetId) use ($parsed, $build): Request {
@@ -656,6 +684,17 @@ class SheetFormatter
         return $this;
     }
 
+    private function assertRoom(): void
+    {
+        if (count($this->pending) >= self::MAX_OPERATIONS) {
+            throw new \OverflowException(sprintf(
+                'A formatting pass takes at most %d operations, and this one is already full. '
+                . 'Call apply() and start another pass.',
+                self::MAX_OPERATIONS
+            ));
+        }
+    }
+
     /**
      * Tab title to numeric sheet id, in the order the spreadsheet holds them, so the first
      * key is the tab a range without a name refers to.
@@ -670,7 +709,7 @@ class SheetFormatter
 
         $ids = [];
 
-        foreach ($spreadsheet->getSheets() as $sheet) {
+        foreach ($spreadsheet->getSheets() ?? [] as $sheet) {
             $properties = $sheet->getProperties();
 
             if ($properties === null || $properties->getTitle() === null || $properties->getSheetId() === null) {
@@ -688,6 +727,8 @@ class SheetFormatter
      */
     private function tabProperty(string $tab, string $field, mixed $value): self
     {
+        $this->assertRoom();
+
         $this->pending[] = [
             'tab'   => $tab,
             'build' => static function (int $sheetId) use ($field, $value): Request {
@@ -718,7 +759,7 @@ class SheetFormatter
     {
         if ($pixels < self::MIN_PIXELS || $pixels > self::MAX_PIXELS) {
             throw new \InvalidArgumentException(sprintf(
-                'A size of %d pixels is outside the %d–%d Google accepts.',
+                'A size of %d pixels is outside the %d–%d this bundle allows.',
                 $pixels,
                 self::MIN_PIXELS,
                 self::MAX_PIXELS
@@ -727,6 +768,8 @@ class SheetFormatter
 
         $parsed = SheetRange::fromA1($range);
         $rows   = $dimension === 'ROWS';
+
+        $this->assertRoom();
 
         $this->pending[] = [
             'tab'   => $parsed->tab,

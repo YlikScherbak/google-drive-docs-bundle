@@ -419,7 +419,7 @@ class SpreadsheetService
 
         $ids = [];
 
-        foreach ($spreadsheet->getSheets() as $sheet) {
+        foreach ($spreadsheet->getSheets() ?? [] as $sheet) {
             $properties = $sheet->getProperties();
 
             if ($properties === null || $properties->getTitle() === null || $properties->getSheetId() === null) {

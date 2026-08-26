@@ -119,6 +119,13 @@ class DriveDocumentService
     /** Resumable chunks must be a multiple of this. */
     public const CHUNK_GRANULARITY = 256 * 1024;
 
+    /**
+     * The largest chunk worth allowing. Every chunk is read into memory whole, so a bigger
+     * one buys fewer round trips at the price of the PHP memory limit; past this it is a
+     * configuration mistake rather than a tuning choice.
+     */
+    public const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
+
     private const FALLBACK_MIME = 'application/octet-stream';
 
     /**
@@ -167,9 +174,9 @@ class DriveDocumentService
     ];
 
     /**
-     * Per-request cache of direct grants: fileId => list of e-mails.
+     * Per-request cache of direct grants: fileId => (normalised e-mail => strongest role).
      *
-     * @var array<string, string[]>
+     * @var array<string, array<string, string>>
      */
     private array $grantCache = [];
 
@@ -195,6 +202,15 @@ class DriveDocumentService
                 'A resumable chunk must be a positive multiple of %d bytes, %d given.',
                 self::CHUNK_GRANULARITY,
                 $this->chunkBytes
+            ));
+        }
+
+        if ($this->chunkBytes > self::MAX_CHUNK_BYTES) {
+            throw new \InvalidArgumentException(sprintf(
+                'A resumable chunk of %d bytes is read into memory whole; %d is the most this '
+                . 'bundle will take.',
+                $this->chunkBytes,
+                self::MAX_CHUNK_BYTES
             ));
         }
     }
@@ -297,6 +313,9 @@ class DriveDocumentService
             throw new \InvalidArgumentException(sprintf('Cannot read the file to import: "%s".', $path));
         }
 
+        // A stat is a fast path, not an authority: a network mount or a stream wrapper can
+        // answer 0 for a file full of bytes. It buys an early refusal when it is right, and
+        // both upload paths check the size again against what they actually read.
         $size = filesize($path);
 
         if ($size !== false) {
@@ -939,7 +958,7 @@ class DriveDocumentService
                 throw $e;
             }
 
-            foreach ($this->grantsFor($file, $identities) as $role) {
+            foreach ($this->grantsFor($file, $identities, true) as $role) {
                 $best = $this->strongerRole($best, $role);
             }
 
@@ -1244,10 +1263,14 @@ class DriveDocumentService
      * The roles the given identities hold on an item, from the file's own permissions when
      * Google sent them and from the dedicated lookup otherwise.
      *
+     * A boolean answer can stop at the first match, but the strongest role cannot: the
+     * permissions Google embeds in a file are not always the whole list, so asking for
+     * every grant means reading both sources.
+     *
      * @param string[] $identities normalised e-mail plus the viewer group addresses
      * @return list<string> one role per matching grant, unranked
      */
-    private function grantsFor(DriveFile $file, array $identities): array
+    private function grantsFor(DriveFile $file, array $identities, bool $everyGrant = false): array
     {
         if ($identities === []) {
             return [];
@@ -1262,7 +1285,7 @@ class DriveDocumentService
             }
         }
 
-        if ($roles !== []) {
+        if ($roles !== [] && !$everyGrant) {
             return $roles;
         }
 
@@ -1508,9 +1531,15 @@ class DriveDocumentService
         }
 
         if (strlen($contents) > self::MULTIPART_LIMIT) {
-            // Only reachable when filesize() failed or the file grew; chunk it instead.
-            return $this->uploadResumable($path, $metadata, $uploadMime, strlen($contents));
+            // Only reachable when the stat was wrong or the file grew. These bytes are not
+            // the whole file, so its size has to be measured rather than taken from them:
+            // a resumable session declares the total up front and Google rejects the first
+            // chunk that runs past it.
+            return $this->uploadResumable($path, $metadata, $uploadMime, $this->measureSize($path));
         }
+
+        // What was read is the last word on how big this is, whatever the stat claimed.
+        $this->assertUploadSize(strlen($contents));
 
         return $this->drive->files->create($metadata, [
             'data'              => $contents,
@@ -1530,6 +1559,8 @@ class DriveDocumentService
      */
     private function uploadResumable(string $path, DriveFile $metadata, string $uploadMime, int $size): DriveFile
     {
+        $this->assertUploadSize($size);
+
         $client = $this->drive->getClient();
         $handle = false;
 
@@ -1564,17 +1595,36 @@ class DriveDocumentService
             }
 
             $status = false;
+            $sent   = 0;
 
-            while ($status === false && !feof($handle)) {
-                $chunk = fread($handle, $this->chunkBytes);
+            // Driven by the declared total rather than feof(): that is the number Google
+            // measures the chunks against, and a file that shrank underneath us must fail
+            // rather than open a session it can never fill.
+            while ($status === false && $sent < $size) {
+                $take = min($this->chunkBytes, $size - $sent);
 
-                if ($chunk === false) {
+                // Never leave a single byte for the last chunk: the Google client asks
+                // `false == $chunk`, and PHP reads the one-byte string "0" as false, so such
+                // a chunk would be dropped and the upload stall one byte from done.
+                //
+                // Swallow that byte instead of shortening this chunk. Only the *last* chunk
+                // may be any size — every earlier one has to be a multiple of the
+                // granularity, which is the rule chunkBytes itself is validated against —
+                // and taking the extra byte is what makes this one the last.
+                if ($size - $sent - $take === 1) {
+                    ++$take;
+                }
+
+                $chunk = fread($handle, $take);
+
+                if ($chunk === false || $chunk === '') {
                     throw new UnexpectedDriveStateException(sprintf(
                         'Reading "%s" stopped part way through the upload.',
                         $path
                     ));
                 }
 
+                $sent  += strlen($chunk);
                 $status = $media->nextChunk($chunk);
             }
 
@@ -1592,6 +1642,46 @@ class DriveDocumentService
             }
 
             $client->setDefer(false);
+        }
+    }
+
+    /**
+     * The size of a file the stat could not describe, taken from the stream instead.
+     *
+     * Seeking to the end is the cheapest honest answer: it reads nothing, and a stream that
+     * cannot even do that cannot feed a resumable upload either, which has to know the total
+     * before it sends the first chunk.
+     */
+    private function measureSize(string $path): int
+    {
+        $handle = fopen($path, 'rb');
+
+        if ($handle === false) {
+            throw new \InvalidArgumentException(sprintf('Could not open the file to import: "%s".', $path));
+        }
+
+        try {
+            if (fseek($handle, 0, SEEK_END) !== 0) {
+                throw new UnexpectedDriveStateException(sprintf(
+                    'The size of "%s" cannot be established: its stat says nothing and the stream '
+                    . 'will not seek. A resumable upload has to declare the total up front, so copy '
+                    . 'the file somewhere seekable and import that.',
+                    $path
+                ));
+            }
+
+            $size = ftell($handle);
+
+            if ($size === false) {
+                throw new UnexpectedDriveStateException(sprintf(
+                    'The size of "%s" cannot be established: the stream would not say where its end is.',
+                    $path
+                ));
+            }
+
+            return $size;
+        } finally {
+            fclose($handle);
         }
     }
 

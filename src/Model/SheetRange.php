@@ -17,6 +17,18 @@ namespace Borsche\GoogleDriveDocsBundle\Model;
  */
 final class SheetRange
 {
+    /**
+     * Where a range stops being worth sending.
+     *
+     * Google Sheets documents a maximum of 18 278 columns — A to ZZZ — and caps a spreadsheet
+     * at ten million cells, which is also the most rows any single-column range could name.
+     * Deliberately loose: a bound that is too tight refuses work Google would have accepted,
+     * while one that is too loose only lets Google answer for itself. (16 384 columns and
+     * 1 048 576 rows are Excel's grid, not this one.)
+     */
+    public const MAX_COLUMNS = 18278;
+    public const MAX_ROWS    = 10000000;
+
     public function __construct(
         /** Null when the notation named no tab; the caller decides which one that means. */
         public readonly ?string $tab,
@@ -176,7 +188,32 @@ final class SheetRange
             throw new \InvalidArgumentException(sprintf('"%s" names row 0; rows start at 1.', $original));
         }
 
-        return [$m[1] === '' ? null : self::columnIndex($m[1]), $row];
+        if ($row !== null && $row > self::MAX_ROWS) {
+            throw new \InvalidArgumentException(sprintf(
+                '"%s" names row %d, past the %d cells a spreadsheet can hold at all.',
+                $original,
+                $row,
+                self::MAX_ROWS
+            ));
+        }
+
+        if ($m[1] === '') {
+            return [null, $row];
+        }
+
+        $column = self::columnIndex($m[1]);
+
+        // Caught here rather than at Google: a column this far out is a typo in the
+        // notation, and a 400 three calls later says nothing about which range caused it.
+        if ($column >= self::MAX_COLUMNS) {
+            throw new \InvalidArgumentException(sprintf(
+                '"%s" names column %s, past ZZZ, the last one a spreadsheet has.',
+                $original,
+                strtoupper($m[1])
+            ));
+        }
+
+        return [$column, $row];
     }
 
     /**

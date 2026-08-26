@@ -7,6 +7,7 @@ namespace Borsche\GoogleDriveDocsBundle\Tests\Service;
 use Borsche\GoogleDriveDocsBundle\Event\SheetFormattedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\SheetTabAddedEvent;
 use Borsche\GoogleDriveDocsBundle\Exception\AccessDeniedException;
+use Borsche\GoogleDriveDocsBundle\Exception\UnexpectedDriveStateException;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
 use Borsche\GoogleDriveDocsBundle\Tests\CollectingEventDispatcher;
@@ -266,6 +267,20 @@ final class SheetFormatterTest extends TestCase
         $this->service()->format('sheet-1')->apply();
 
         self::assertSame([], $this->dispatcher->events);
+    }
+
+    public function testASpreadsheetGoogleDescribesWithoutTabsIsReportedClearly(): void
+    {
+        // Not "no tab called ''": the tabs exist, the answer describing them did not arrive.
+        // A fresh mock, because setUp() already taught the shared one about two tabs.
+        $this->spreadsheets = $this->createMock(Spreadsheets::class);
+        $this->spreadsheets->method('get')->willReturn(new Spreadsheet());
+        $this->spreadsheets->expects(self::never())->method('batchUpdate');
+
+        $this->expectException(UnexpectedDriveStateException::class);
+        $this->expectExceptionMessageMatches('/without a single usable tab/');
+
+        $this->service()->format('sheet-1')->freeze('Q3', rows: 1)->apply();
     }
 
     public function testApplyingTwiceDoesNotResendThePass(): void

@@ -513,6 +513,10 @@ is work for whoever is looking at the spreadsheet, not for something generating 
 Still not covered: charts and pivot tables, which are a different order of complexity and rarely
 built programmatically; named ranges; developer metadata; and sorting a range in place.
 
+A pass takes at most `SheetFormatter::MAX_OPERATIONS` (500) operations, since it travels as a
+single `batchUpdate`: the 501st call raises an `OverflowException` naming the limit rather than
+letting Google answer the whole batch with a bare 400. Call `apply()` and start another pass.
+
 ## Events
 
 Every write operation dispatches a PSR-14 event, so auditing, notifications or cache
@@ -707,7 +711,15 @@ $sheet->webViewLink;  // already editable in the embedded editor
   request; past it the bundle switches to Drive's resumable protocol and sends the bytes in
   chunks, so nothing larger than one chunk is ever held in memory. Drive's own ceiling — 5 TB —
   is what is left. Set `upload.max_bytes` if you want a policy limit of your own; going over it
-  raises `UploadTooLargeException` before anything is read.
+  raises `UploadTooLargeException`, before anything is read when the file's stat is reliable and
+  against the bytes actually read when it is not. `max_bytes: 0`, the default, means no limit of
+  your own — not "nothing may be uploaded".
+- **`chunk_bytes` has to suit the protocol**: a multiple of 256 KB, and at most
+  `MAX_CHUNK_BYTES` (64 MB), because every chunk is read into memory whole. Both are checked
+  when the container is built, not on the first import.
+- **The path is trusted.** `import()` reads whatever path it is given, so it must never come
+  straight from a request: `$uploadedFile->getPathname()` points into the upload directory,
+  while a raw parameter would happily name `.env`. Build the path yourself.
 - **A stored-as-is file stays invisible to `listFolder()`** unless its MIME type is listed in
   `document_mime_types` — add `application/pdf` there if you import PDFs and want them shown.
 

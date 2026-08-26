@@ -209,6 +209,23 @@ final class DriveDocumentServiceRoleTest extends TestCase
         );
     }
 
+    public function testTheStrongestRoleWinsEvenWhenGoogleEmbedsOnlyTheWeakOne(): void
+    {
+        // The permissions Google embeds in a file are not always the whole list, so a role
+        // found there must not stop the dedicated lookup that may know a stronger one.
+        $file = new DriveFile(['id' => 'doc', 'parents' => [self::DRIVE_ID]]);
+        $file->setPermissions([
+            new GooglePermission(['emailAddress' => 'viewer@example.com', 'type' => 'user', 'role' => 'reader']),
+        ]);
+
+        $this->files->method('get')->willReturn($file);
+        $this->grants(['doc' => ['team@example.com' => 'writer']]);
+
+        $service = $this->service(new FakeViewerContext('viewer@example.com', false, ['team@example.com']));
+
+        self::assertSame('writer', $service->roleOf('doc'));
+    }
+
     private function service(
         ?ViewerContextInterface $context = null,
         ?\Psr\Cache\CacheItemPoolInterface $pool = null

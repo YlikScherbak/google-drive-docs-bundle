@@ -58,6 +58,14 @@ final class SheetRangeTest extends TestCase
         yield 'the 27th column'      => ['Q3!AB1:AB1', 'Q3', 0, 1, 27, 28];
         yield 'a wide span'          => ['Q3!A1:ZZ999', 'Q3', 0, 999, 0, 702];
         yield 'surrounding spaces'   => ['  Q3!A1:B2  ', 'Q3', 0, 2, 0, 2];
+        yield 'a cell spelled twice' => ['Q3!A1:A1', 'Q3', 0, 1, 0, 1];
+        yield 'three letter column'  => ['Q3!AAA1', 'Q3', 0, 1, 702, 703];
+        yield 'excels last column'   => ['Q3!XFD1', 'Q3', 0, 1, 16383, 16384];
+        // Past Excel's grid but inside Google's, which is the wider of the two.
+        yield 'past excels column'   => ['Q3!XFE1', 'Q3', 0, 1, 16384, 16385];
+        yield 'past excels row'      => ['Q3!A1048577', 'Q3', 1048576, 1048577, 0, 1];
+        yield 'the very last column' => ['Q3!ZZZ1', 'Q3', 0, 1, 18277, 18278];
+        yield 'a bare row number'    => ['5', null, 4, 5, null, null];
     }
 
     /**
@@ -83,6 +91,10 @@ final class SheetRangeTest extends TestCase
         yield 'a digit before letter' => ['Q3!1A'];
         yield 'an unclosed quote'     => ["'My Sheet!A1"];
         yield 'row zero'              => ['Q3!A0'];
+        // Past the edges of Google's own grid: worth naming here rather than as a 400 later.
+        yield 'a column past ZZZ'     => ['Q3!AAAA1'];
+        yield 'a very wide column'    => ['Q3!ZZZZ1'];
+        yield 'a row past the cells'  => ['Q3!A10000001'];
         yield 'a stray character'     => ['Q3!A1:B2!'];
     }
 

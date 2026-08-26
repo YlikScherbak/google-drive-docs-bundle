@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Borsche\GoogleDriveDocsBundle\Tests\Service;
 
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
+use Borsche\GoogleDriveDocsBundle\Service\SheetFormatter;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
 use Borsche\GoogleDriveDocsBundle\Tests\CollectingEventDispatcher;
 use Google\Service\Sheets;
@@ -252,6 +253,22 @@ final class SheetFormatterExtrasTest extends TestCase
             ->apply();
 
         self::assertCount(9, $this->sent->getRequests());
+    }
+
+    public function testAPassRefusesMoreOperationsThanOneBatchTakes(): void
+    {
+        // The whole pass travels as one batchUpdate; Google answers an oversized one with a
+        // bare 400, so the call that went too far is named here instead.
+        $formatter = $this->format();
+
+        for ($i = 0; $i < SheetFormatter::MAX_OPERATIONS; ++$i) {
+            $formatter->freeze('Q3', rows: 1);
+        }
+
+        $this->expectException(\OverflowException::class);
+        $this->expectExceptionMessageMatches('/apply\(\)/');
+
+        $formatter->freeze('Q3', rows: 1);
     }
 
     private function format(): \Borsche\GoogleDriveDocsBundle\Service\SheetFormatter
