@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The live test now covers the authorization boundary**, which was its most conspicuous gap: the
+  voter and the resolver are the newest code in the bundle and the most security-critical, and the
+  suite that exists to check what mocks cannot did not touch either of them. Seven checks against
+  real grants on a real file, decided by `DriveVoter` behind Symfony's own `AccessDecisionManager` —
+  a `reader` granted `DRIVE_VIEW` and refused `DRIVE_EDIT`, `DRIVE_SHARE` and `DRIVE_DELETE`; a
+  `writer` passing all four; a viewer with no grant refused everything; `seesEverything()`
+  bypassing; an empty subject abstained on rather than sent to Drive; and `DriveDocumentResolver`
+  raising `AccessDeniedException` for an unreachable id before a controller body would run. 42
+  checks with a second identity configured, 30 and four skips without
+
+### Changed
+- `tools` is in PHPStan's analysed paths, so a script that exists to check the bundle is itself
+  checked on every run of the static-analysis job. Getting it there meant removing the `global`
+  counters an analyser cannot follow — they are static properties of one small class now — and
+  moving the `exit()` out of the `finally` block, where it discarded whatever the body was raising.
+  That last one is the same mistake this script had already found in one of its own checks
+
 ## [1.0.6] - 2026-08-26
 
 ### Added

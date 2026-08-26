@@ -37,10 +37,18 @@ declare(strict_types=1);
 
 use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+use Borsche\GoogleDriveDocsBundle\Controller\DriveDocumentResolver;
+use Borsche\GoogleDriveDocsBundle\Exception\AccessDeniedException;
+use Borsche\GoogleDriveDocsBundle\Model\DriveDocument;
+use Borsche\GoogleDriveDocsBundle\Security\DriveVoter;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
 use Google\Service\Drive;
 use Google\Service\Sheets;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpKernel\ControllerMetadata\ArgumentMetadata;
+use Symfony\Component\Security\Core\Authentication\Token\NullToken;
+use Symfony\Component\Security\Core\Authorization\AccessDecisionManager;
 
 require __DIR__ . '/../vendor/autoload.php';
 
@@ -109,23 +117,38 @@ $secondEmail = getenv('SMOKE_SECOND_EMAIL') ?: null;
 
 // ---------------------------------------------------------------- reporting
 
-$passed  = [];
-$failed  = [];
-$skipped = [];
+/**
+ * What the run has learned so far.
+ *
+ * Static rather than the `global` these were before, so a static analyser can follow the writes:
+ * a script that exists to check the bundle should itself be checkable.
+ */
+final class Tally
+{
+    /** @var string[] */
+    public static array $passed = [];
+
+    /** @var string[] */
+    public static array $failed = [];
+
+    /** @var string[] */
+    public static array $skipped = [];
+
+    /** @var array<string, string> id => label, for the cleanup to walk in reverse */
+    public static array $created = [];
+}
 
 /** Runs one check; a failure is recorded and the run continues. */
 function check(string $name, callable $body): mixed
 {
-    global $passed, $failed;
-
     try {
         $result = $body();
-        $passed[] = $name;
+        Tally::$passed[] = $name;
         echo "  \u{2713} {$name}\n";
 
         return $result;
     } catch (Throwable $e) {
-        $failed[] = $name . ' — ' . $e->getMessage();
+        Tally::$failed[] = $name . ' — ' . $e->getMessage();
         echo "  \u{2717} {$name}\n      " . get_class($e) . ': ' . $e->getMessage() . "\n";
 
         return null;
@@ -134,8 +157,7 @@ function check(string $name, callable $body): mixed
 
 function skip(string $name, string $why): void
 {
-    global $skipped;
-    $skipped[] = $name . ' — ' . $why;
+    Tally::$skipped[] = $name . ' — ' . $why;
     echo "  \u{2013} {$name} (skipped: {$why})\n";
 }
 
@@ -211,14 +233,12 @@ $sheets    = new SpreadsheetService($sheetsApi, $drive);
 
 $stamp     = date('Ymd_His');
 $folderId  = null;
-/** @var array<string, string> id => label, deleted newest first */
-$created   = [];
 $tempFiles = [];
 
+/** Records something the run created, so the cleanup cannot forget it. */
 function born(string $id, string $label): string
 {
-    global $created;
-    $created[$id] = $label;
+    Tally::$created[$id] = $label;
 
     return $id;
 }
@@ -761,9 +781,148 @@ try {
             return null;
         });
     }
+
+    // ------------------------------------------------------------ authorization
+    echo "\nAuthorization boundary (the voter and the resolver, against real grants)\n";
+
+    if ($secondEmail === null) {
+        skip('DriveVoter separates VIEW from the mutating attributes', 'needs SMOKE_SECOND_EMAIL');
+        skip('the resolver refuses an id the viewer cannot reach', 'needs SMOKE_SECOND_EMAIL');
+    } elseif ($sheetId !== null) {
+        // The real thing: this bundle's voter behind Symfony's own decision manager, deciding on a
+        // grant Drive actually holds. A unit test answers "does the voter read a role correctly";
+        // only this answers "does a reader on this drive get refused an edit".
+        $decide = static function (DriveDocumentService $drive, SmokeViewer $viewer, string $attribute, mixed $subject): bool {
+            $manager = new AccessDecisionManager([new DriveVoter($drive, $viewer)]);
+
+            return $manager->decide(new NullToken(), [$attribute], $subject);
+        };
+
+        /** Runs the body as a restricted viewer, and puts the context back whatever happens. */
+        $asViewer = static function (SmokeViewer $viewer, ?string $email, callable $body): mixed {
+            $viewer->everything = false;
+            $viewer->email      = $email;
+
+            try {
+                return $body();
+            } finally {
+                $viewer->everything = true;
+                $viewer->email      = null;
+            }
+        };
+
+        check('a reader is granted VIEW and refused every mutating attribute', static function () use ($drive, $viewer, $sheetId, $secondEmail, $decide, $asViewer) {
+            $grant = $drive->grant($sheetId, $secondEmail, 'reader');
+
+            try {
+                return $asViewer($viewer, $secondEmail, static function () use ($drive, $viewer, $sheetId, $decide) {
+                    assertTrue($decide($drive, $viewer, DriveVoter::VIEW, $sheetId), 'a reader was refused VIEW');
+
+                    foreach ([DriveVoter::EDIT, DriveVoter::SHARE, DriveVoter::DELETE] as $attribute) {
+                        assertTrue(
+                            !$decide($drive, $viewer, $attribute, $sheetId),
+                            sprintf('a reader was granted %s, so the authorization boundary is open', $attribute)
+                        );
+                    }
+
+                    return null;
+                });
+            } finally {
+                try {
+                    $drive->revoke($sheetId, $grant->id);
+                } catch (Throwable) {
+                }
+            }
+        });
+
+        check('a writer is granted all four', static function () use ($drive, $viewer, $sheetId, $secondEmail, $decide, $asViewer) {
+            $grant = $drive->grant($sheetId, $secondEmail, 'writer');
+
+            try {
+                return $asViewer($viewer, $secondEmail, static function () use ($drive, $viewer, $sheetId, $decide) {
+                    foreach ([DriveVoter::VIEW, DriveVoter::EDIT, DriveVoter::SHARE, DriveVoter::DELETE] as $attribute) {
+                        assertTrue($decide($drive, $viewer, $attribute, $sheetId), sprintf('a writer was refused %s', $attribute));
+                    }
+
+                    return null;
+                });
+            } finally {
+                try {
+                    $drive->revoke($sheetId, $grant->id);
+                } catch (Throwable) {
+                }
+            }
+        });
+
+        check('a viewer with no grant at all is refused everything', static function () use ($drive, $viewer, $sheetId, $secondEmail, $decide, $asViewer) {
+            return $asViewer($viewer, $secondEmail, static function () use ($drive, $viewer, $sheetId, $decide) {
+                foreach ([DriveVoter::VIEW, DriveVoter::EDIT, DriveVoter::SHARE, DriveVoter::DELETE] as $attribute) {
+                    assertTrue(
+                        !$decide($drive, $viewer, $attribute, $sheetId),
+                        sprintf('an ungranted viewer was allowed %s', $attribute)
+                    );
+                }
+
+                return null;
+            });
+        });
+
+        check('seesEverything() passes all four without any grant', static function () use ($drive, $viewer, $sheetId, $decide) {
+            foreach ([DriveVoter::VIEW, DriveVoter::EDIT, DriveVoter::SHARE, DriveVoter::DELETE] as $attribute) {
+                assertTrue($decide($drive, $viewer, $attribute, $sheetId), 'the bypass did not apply to ' . $attribute);
+            }
+
+            return null;
+        });
+
+        check('the voter abstains on an empty subject instead of asking Drive about an empty id', static function () use ($drive, $viewer, $decide) {
+            // An abstain with nobody else voting is a refusal, and no Drive call is made. What it
+            // replaced was a 400 from Google on every such request.
+            assertTrue(!$decide($drive, $viewer, DriveVoter::VIEW, ''), 'an empty subject was allowed');
+
+            return null;
+        });
+
+        check('a DriveDocument argument resolves from the route', static function () use ($drive, $sheetId) {
+            $resolver = new DriveDocumentResolver($drive);
+            $request  = new Request();
+            $request->attributes->set('fileId', $sheetId);
+
+            $resolved = [];
+
+            foreach ($resolver->resolve($request, new ArgumentMetadata('document', DriveDocument::class, false, false, null)) as $one) {
+                $resolved[] = $one;
+            }
+
+            assertTrue(count($resolved) === 1, 'the resolver returned ' . count($resolved) . ' arguments');
+            assertTrue($resolved[0]->id === $sheetId, 'a different document came back');
+
+            return null;
+        });
+
+        check('the resolver refuses an id the viewer cannot reach, before the controller runs', static function () use ($drive, $viewer, $sheetId, $secondEmail, $asViewer) {
+            // The whole point of resolving rather than trusting the id: the access check runs here,
+            // not in a controller body someone forgot to guard.
+            return $asViewer($viewer, $secondEmail, static function () use ($drive, $sheetId) {
+                $resolver = new DriveDocumentResolver($drive);
+                $request  = new Request();
+                $request->attributes->set('fileId', $sheetId);
+
+                try {
+                    foreach ($resolver->resolve($request, new ArgumentMetadata('document', DriveDocument::class, false, false, null)) as $ignored) {
+                        // Consuming the iterable is what runs the check.
+                    }
+                } catch (AccessDeniedException) {
+                    return null;
+                }
+
+                throw new RuntimeException('an unreachable document resolved anyway');
+            });
+        });
+    }
 } catch (Throwable $e) {
     echo "\n!! the run stopped: " . get_class($e) . ': ' . $e->getMessage() . "\n";
-    $failed[] = 'run aborted — ' . $e->getMessage();
+    Tally::$failed[] = 'run aborted — ' . $e->getMessage();
 } finally {
     // ------------------------------------------------------------ cleanup
     echo "\n" . str_repeat('-', 72) . "\nCleanup\n";
@@ -772,7 +931,7 @@ try {
     $stuck   = [];
 
     // Children before the folder, so nothing is orphaned if a delete refuses.
-    foreach (array_reverse($created, true) as $id => $label) {
+    foreach (array_reverse(Tally::$created, true) as $id => $label) {
         if ($id === $folderId) {
             continue;
         }
@@ -796,8 +955,8 @@ try {
     if ($folderId !== null) {
         try {
             $drive->deleteForever($folderId);
-            $deleted[] = ($created[$folderId] ?? 'folder') . " ({$folderId})";
-            echo "  erased " . ($created[$folderId] ?? 'folder') . " ({$folderId})\n";
+            $deleted[] = (Tally::$created[$folderId] ?? 'folder') . " ({$folderId})";
+            echo "  erased " . (Tally::$created[$folderId] ?? 'folder') . " ({$folderId})\n";
         } catch (Throwable $e) {
             $stuck[] = "folder ({$folderId}) — " . $e->getMessage();
             echo "  !! LEFT BEHIND folder ({$folderId}): " . $e->getMessage() . "\n";
@@ -813,23 +972,28 @@ try {
 
     // ------------------------------------------------------------ the tally
     echo "\n" . str_repeat('=', 72) . "\n";
-    printf("passed %d   failed %d   skipped %d\n", count($passed), count($failed), count($skipped));
+    printf(
+        "passed %d   failed %d   skipped %d\n",
+        count(Tally::$passed),
+        count(Tally::$failed),
+        count(Tally::$skipped)
+    );
 
-    if ($failed !== []) {
+    if (Tally::$failed !== []) {
         echo "\nFailed:\n";
-        foreach ($failed as $line) {
+        foreach (Tally::$failed as $line) {
             echo "  - {$line}\n";
         }
     }
 
-    if ($skipped !== []) {
+    if (Tally::$skipped !== []) {
         echo "\nSkipped:\n";
-        foreach ($skipped as $line) {
+        foreach (Tally::$skipped as $line) {
             echo "  - {$line}\n";
         }
     }
 
-    printf("\ncreated %d objects in the drive, erased %d\n", count($created), count($deleted));
+    printf("\ncreated %d objects in the drive, erased %d\n", count(Tally::$created), count($deleted));
 
     if ($stuck !== []) {
         echo "\n!! STILL IN THE DRIVE — delete these by hand:\n";
@@ -838,5 +1002,9 @@ try {
         }
     }
 
-    exit($failed === [] && $stuck === [] ? 0 : 1);
+    $exitCode = Tally::$failed === [] && $stuck === [] ? 0 : 1;
 }
+
+// Outside the finally on purpose: an exit in there discards whatever the try was raising, which
+// is exactly the mistake this script found in one of its own checks.
+exit($exitCode);

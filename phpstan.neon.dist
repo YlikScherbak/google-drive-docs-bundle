@@ -2,4 +2,7 @@ parameters:
     level: 6
     paths:
         - src
+        # The live test too: a script that exists to check the bundle should itself be checked,
+        # and putting it under analysis is what found the appProperties annotation in 1.0.6.
+        - tools
     treatPhpDocTypesAsCertain: false

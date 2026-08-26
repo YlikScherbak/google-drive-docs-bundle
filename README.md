@@ -1219,7 +1219,15 @@ JSON `null` never lifted an expiry — both shipped broken, both found by asking
 So `tools/smoke-test.php` asks Drive. It creates a folder, works through the bundle's surface
 against it — values, formatting, revisions, exports, a resumable upload over 5 MB, the changes
 feed, locking, trash, sharing — and erases everything it made in a `finally` block, including
-after a fatal error:
+after a fatal error.
+
+It also checks the **authorization boundary** the way your application will meet it: real grants
+on a real file, decided by `DriveVoter` behind Symfony's own `AccessDecisionManager`. A `reader`
+is granted `DRIVE_VIEW` and refused `DRIVE_EDIT`, `DRIVE_SHARE` and `DRIVE_DELETE`; a `writer`
+passes all four; a viewer with no grant is refused everything; `seesEverything()` bypasses; and
+`DriveDocumentResolver` raises `AccessDeniedException` for an id the viewer cannot reach, before
+a controller body would run. A unit test can say the voter reads a role correctly — only this
+says a reader on your drive actually gets refused.
 
 ```bash
 GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... GOOGLE_SHARED_DRIVE_ID=... \
@@ -1228,9 +1236,10 @@ GOOGLE_OAUTH_REFRESH_TOKEN=... php tools/smoke-test.php
 
 Or keep the four in a file and point `SMOKE_ENV_FILE` at it; the environment still wins. Two
 optional variables: `SMOKE_PREFIX` renames what it creates (default `smoke_test_`), and
-`SMOKE_SECOND_EMAIL` enables the two sharing checks that need a second Google identity, because a
-grant cannot be made to the account that already owns the drive — that address is granted access
-and revoked again, with no notification e-mail. Without it those two report as skipped.
+`SMOKE_SECOND_EMAIL` enables the checks that need a second Google identity, because a grant cannot
+be made to the account that already owns the drive — that address is granted access and revoked
+again, with no notification e-mail. Without it the two sharing checks and the two authorization
+ones report as skipped: 42 checks with it, 30 and 4 skips without.
 
 > **It writes to a real drive.** Point it at one you are willing to have written to. Every object
 > it creates carries the prefix and lives inside one folder, and the run ends by printing what it
