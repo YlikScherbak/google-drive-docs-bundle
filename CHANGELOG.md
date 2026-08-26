@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-08-26
+
 ### Added
 - **The live smoke test is part of the repository.** `tools/smoke-test.php` works through the
   bundle's surface against a real Shared Drive and erases everything it creates, including after a
@@ -14,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Credentials come from the environment (or a file named by `SMOKE_ENV_FILE`), what it creates can
   be renamed with `SMOKE_PREFIX`, and `SMOKE_SECOND_EMAIL` enables the two sharing checks that need
   a second Google identity
+
+### Fixed
+- `setAppProperties()` was annotated `array<string, string|int|float|bool|null>`, which is not what
+  PHP hands it: a key like `"2024"` arrives as the integer `2024`. Callers doing nothing wrong got a
+  false error from their own PHPStan on code the method handles correctly — the casts inside it exist
+  for exactly that case. The annotation admits `array-key` now and says why. Found by bringing the
+  live test under static analysis
 - A manual **Live smoke test** CI workflow that runs it. Manual rather than automatic on purpose:
   it writes to a real drive and spends Google quota, so it runs when asked. Reports what is missing
   instead of failing obscurely when the secrets are absent
@@ -574,7 +583,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.2...v1.0.3
