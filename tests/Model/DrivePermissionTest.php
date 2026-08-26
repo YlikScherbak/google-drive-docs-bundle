@@ -29,6 +29,7 @@ final class DrivePermissionTest extends TestCase
             'displayName'   => 'User',
             'inherited'     => true,
             'inheritedFrom' => 'folder-1',
+            'expiresAt'     => null,
         ], $permission->toArray());
     }
 }

@@ -25,7 +25,18 @@ final class DrivePermission
         /** Inherited permissions can only be revoked on the folder that granted them. */
         public readonly bool $inherited = false,
         public readonly ?string $inheritedFrom = null,
+        /**
+         * When Google will drop this grant by itself, RFC 3339, or null for a lasting one.
+         * Google only allows an expiry on user and group grants, no more than a year ahead.
+         */
+        public readonly ?string $expiresAt = null,
     ) {
+    }
+
+    /** Whether this grant goes away on its own. */
+    public function expires(): bool
+    {
+        return $this->expiresAt !== null;
     }
 
     /** @return array<string, mixed> */
@@ -39,6 +50,7 @@ final class DrivePermission
             'displayName'   => $this->displayName,
             'inherited'     => $this->inherited,
             'inheritedFrom' => $this->inheritedFrom,
+            'expiresAt'     => $this->expiresAt,
         ];
     }
 }

@@ -34,6 +34,10 @@ final class DriveDocument
         public readonly ?string $lastModifiedBy = null,
         /** What Google will allow here, or null when the listing did not ask for it. */
         public readonly ?DriveCapabilities $capabilities = null,
+        /** Locked against editing: a finished document nobody should still be changing. */
+        public readonly bool $locked = false,
+        /** What Google shows whoever tries to edit a locked item. */
+        public readonly ?string $lockReason = null,
     ) {
     }
 
@@ -59,6 +63,8 @@ final class DriveDocument
             'thumbnailLink' => $this->thumbnailLink,
             'lastModifiedBy' => $this->lastModifiedBy,
             'capabilities' => $this->capabilities?->toArray(),
+            'locked'       => $this->locked,
+            'lockReason'   => $this->lockReason,
         ];
     }
 }

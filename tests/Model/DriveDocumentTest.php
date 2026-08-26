@@ -48,6 +48,8 @@ final class DriveDocumentTest extends TestCase
             'thumbnailLink' => null,
             'lastModifiedBy' => null,
             'capabilities' => null,
+            'locked'       => false,
+            'lockReason'   => null,
         ], $doc->toArray());
     }
 

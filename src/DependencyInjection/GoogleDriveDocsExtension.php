@@ -6,6 +6,7 @@ namespace Borsche\GoogleDriveDocsBundle\DependencyInjection;
 
 use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\Command\AuthorizeCommand;
+use Borsche\GoogleDriveDocsBundle\Command\CheckCommand;
 use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 use Borsche\GoogleDriveDocsBundle\DependencyInjection\Compiler\ValidateCachePoolPass;
@@ -96,6 +97,14 @@ class GoogleDriveDocsExtension extends Extension
             $command = new Definition(AuthorizeCommand::class, [new Reference(GoogleClientFactory::class)]);
             $command->addTag('console.command');
             $container->setDefinition(AuthorizeCommand::class, $command);
+
+            $check = new Definition(CheckCommand::class, [
+                new Reference('google_drive_docs.drive'),
+                new Reference(DriveDocumentService::class),
+                $config['shared_drive_id'],
+            ]);
+            $check->addTag('console.command');
+            $container->setDefinition(CheckCommand::class, $check);
         }
     }
 

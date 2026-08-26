@@ -6,6 +6,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Access that expires by itself: an `expiresAt` argument on `grant()`, `grantToGroup()` and
+  `grantAsService()`, plus `setExpiry()` to give an existing grant an expiry or lift the one it
+  has. `DrivePermission` gained `expiresAt` and `expires()`. Google's own restrictions — in the
+  future, no more than a year ahead — are checked before the call, because a Drive 400 names
+  neither the value nor the grant
+- `lock()` and `unlock()` freeze a finished document against editing, with the reason Google
+  shows whoever tries. `DriveDocument` gained `locked` and `lockReason`, and a locked item's
+  `capabilities` report `canEdit: false`, so a UI built on capabilities needs no changes.
+  Reported by the new `DocumentLockChangedEvent`
+- `startPageToken()` and `changesSince()` poll for work done **directly in Google**, returning a
+  `DriveChanges` of `DriveChange` entries and the token to resume from. Every change seen drops
+  that item's cached sharing immediately, which closes a gap open since 0.2.0: a share added by
+  hand in the Drive UI no longer waits for the cache to expire
+- `google-drive-docs:check` verifies the setup — credentials and who they authenticate as, the
+  Shared Drive, what the service user may do on it, and whether the root lists. Four independent
+  checks so a half-working setup says which half; read-only throughout. It calls out the common
+  case of the service user being a "Content manager", which may trash but not erase
+
+### Fixed
+- `shared_drive_id` is held to Google's id alphabet before it is interpolated into a Drive query,
+  the way item ids already were. A deliberate debt from 0.3.1
+
+### Notes
+- The change token is the application's to store: the bundle has nowhere to keep it. Polling with
+  a used token replays those changes, and with one never received loses the gap between
+- Push notifications (`changes.watch`) are deliberately not wrapped — they need a public HTTPS
+  endpoint with a valid certificate, which belongs to the application rather than to a library
+- Comments were on the plan for this release and were dropped: the most speculative item in the
+  set, and the same size as half the change polling that closes a real gap
+
 ## [0.8.0] - 2026-08-26
 
 ### Added

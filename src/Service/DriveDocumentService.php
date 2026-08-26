@@ -11,6 +11,7 @@ use Borsche\GoogleDriveDocsBundle\Event\DocumentCopiedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentCreatedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentDeletedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentImportedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\DocumentLockChangedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentMovedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentPropertiesChangedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentRenamedEvent;
@@ -27,6 +28,8 @@ use Borsche\GoogleDriveDocsBundle\Exception\NotCopyableException;
 use Borsche\GoogleDriveDocsBundle\Exception\UnexpectedDriveStateException;
 use Borsche\GoogleDriveDocsBundle\Exception\UploadTooLargeException;
 use Borsche\GoogleDriveDocsBundle\Model\DriveCapabilities;
+use Borsche\GoogleDriveDocsBundle\Model\DriveChange;
+use Borsche\GoogleDriveDocsBundle\Model\DriveChanges;
 use Borsche\GoogleDriveDocsBundle\Model\DriveDocument;
 use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
@@ -35,6 +38,8 @@ use Borsche\GoogleDriveDocsBundle\Model\DriveRevision;
 use Google\Service\Drive;
 use Google\Http\MediaFileUpload;
 use Google\Service\Drive\DriveFile;
+use Google\Service\Drive\Change as GoogleChange;
+use Google\Service\Drive\ContentRestriction;
 use Google\Service\Drive\DriveFileCapabilities;
 use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Drive\Revision as GoogleRevision;
@@ -92,6 +97,7 @@ class DriveDocumentService
 
     private const FILE_FIELDS = 'id,name,mimeType,webViewLink,modifiedTime,trashed,'
         . 'createdTime,size,iconLink,thumbnailLink,lastModifyingUser(displayName,emailAddress),'
+        . 'contentRestrictions(readOnly,reason),'
         . self::CAPABILITY_FIELDS;
 
     /** Items per page when the caller does not say otherwise. */
@@ -627,6 +633,95 @@ class DriveDocumentService
     }
 
     /**
+     * Where to start watching from. Ask once, store it, then poll with changesSince().
+     */
+    public function startPageToken(): string
+    {
+        $this->assertConfigured();
+
+        $token = $this->drive->changes->getStartPageToken([
+            'driveId'           => $this->sharedDriveId,
+            'supportsAllDrives' => true,
+        ])->getStartPageToken();
+
+        if ($token === null || $token === '') {
+            throw new UnexpectedDriveStateException('Google did not hand back a start token to watch from.');
+        }
+
+        return $token;
+    }
+
+    /**
+     * Everything that happened on the drive since the given token.
+     *
+     * This is how the bundle finds out about work done **directly in Google** — a share added
+     * in the Drive UI, a document renamed by hand. Without it the sharing cache only notices
+     * such things when it expires, so every change seen here drops that item's cached
+     * sharing straight away.
+     *
+     * Store the returned nextToken and hand it back next time; the bundle has nowhere to keep
+     * it. Every page is walked before returning, so the token is only ever the end of a
+     * complete batch.
+     */
+    public function changesSince(string $pageToken): DriveChanges
+    {
+        $this->assertConfigured();
+
+        $changes = [];
+        $pages   = 0;
+        $next    = null;
+
+        do {
+            $this->assertPageBudget(++$pages, 'changes.list');
+
+            $response = $this->drive->changes->listChanges($pageToken, [
+                'driveId'                   => $this->sharedDriveId,
+                'includeItemsFromAllDrives' => true,
+                'supportsAllDrives'         => true,
+                'includeRemoved'            => true,
+                'pageSize'                  => 1000,
+                'fields'                    => 'nextPageToken, newStartPageToken, '
+                    . 'changes(fileId,removed,time,file(' . self::FILE_FIELDS . '))',
+            ]);
+
+            foreach ($response->getChanges() as $change) {
+                $changes[] = $this->mapChange($change);
+            }
+
+            $nextPage  = $response->getNextPageToken();
+            $pageToken = $nextPage !== null && $nextPage !== '' ? $nextPage : null;
+            $fresh     = $response->getNewStartPageToken();
+            $next      = $fresh !== null && $fresh !== '' ? $fresh : $next;
+        } while ($pageToken !== null);
+
+        if ($next === null) {
+            throw new UnexpectedDriveStateException(
+                'Google ended the change list without a new token, so there is nowhere to '
+                . 'resume from. Reusing the old one would replay the same changes for ever.'
+            );
+        }
+
+        return new DriveChanges($changes, $next);
+    }
+
+    /**
+     * Lock an item against editing, with the reason Google shows whoever tries.
+     *
+     * For a document that is finished — an approved report, a signed act — where the point is
+     * that nobody edits it by accident afterwards. The service user can lift it again.
+     */
+    public function lock(string $fileId, ?string $reason = null): DriveDocument
+    {
+        return $this->restrictContent($fileId, true, $reason);
+    }
+
+    /** Release a locked item so it can be edited again. */
+    public function unlock(string $fileId): DriveDocument
+    {
+        return $this->restrictContent($fileId, false, null);
+    }
+
+    /**
      * The versions Drive kept of an item, oldest first.
      *
      * **The list can be incomplete.** Google's own documentation says older revisions are
@@ -781,7 +876,7 @@ class DriveDocumentService
 
             $params = [
                 'supportsAllDrives' => true,
-                'fields'            => 'nextPageToken, permissions(id,emailAddress,role,type,displayName,permissionDetails)',
+                'fields'            => 'nextPageToken, permissions(id,emailAddress,role,type,displayName,expirationTime,permissionDetails)',
                 'pageSize'          => 100,
             ];
 
@@ -808,30 +903,42 @@ class DriveDocumentService
         string $fileId,
         string $email,
         string $role = DrivePermission::ROLE_WRITER,
-        string $type = DrivePermission::TYPE_USER
+        string $type = DrivePermission::TYPE_USER,
+        ?\DateTimeInterface $expiresAt = null
     ): DrivePermission {
         // Local validation first: a bad role must not cost a walk up the parent chain.
         $this->assertRole($role);
         $this->assertType($type);
         $this->assertAccess($fileId);
 
-        return $this->share($fileId, $email, $role, $type);
+        return $this->share($fileId, $email, $role, $type, $expiresAt);
     }
 
     /**
      * The sharing call itself, on already validated input. Callers decide whether the
      * viewer's access had to be proven first.
      */
-    private function share(string $fileId, string $email, string $role, string $type): DrivePermission
-    {
-        $created = $this->drive->permissions->create($fileId, new GooglePermission([
+    private function share(
+        string $fileId,
+        string $email,
+        string $role,
+        string $type,
+        ?\DateTimeInterface $expiresAt = null
+    ): DrivePermission {
+        $payload = new GooglePermission([
             'type'         => $type,
             'role'         => $role,
             'emailAddress' => $email,
-        ]), [
+        ]);
+
+        if ($expiresAt !== null) {
+            $payload->setExpirationTime($this->expiryFor($expiresAt));
+        }
+
+        $created = $this->drive->permissions->create($fileId, $payload, [
             'supportsAllDrives'     => true,
             'sendNotificationEmail' => $this->notifyOnShare,
-            'fields'                => 'id,emailAddress,role,type,displayName',
+            'fields'                => 'id,emailAddress,role,type,displayName,expirationTime',
         ]);
 
         $this->forgetGrants($fileId);
@@ -867,12 +974,13 @@ class DriveDocumentService
         string $fileId,
         string $email,
         string $role = DrivePermission::ROLE_WRITER,
-        string $type = DrivePermission::TYPE_USER
+        string $type = DrivePermission::TYPE_USER,
+        ?\DateTimeInterface $expiresAt = null
     ): DrivePermission {
         $this->assertRole($role);
         $this->assertType($type);
 
-        return $this->share($fileId, $email, $role, $type);
+        return $this->share($fileId, $email, $role, $type, $expiresAt);
     }
 
     /**
@@ -881,9 +989,63 @@ class DriveDocumentService
     public function grantToGroup(
         string $fileId,
         string $groupEmail,
-        string $role = DrivePermission::ROLE_WRITER
+        string $role = DrivePermission::ROLE_WRITER,
+        ?\DateTimeInterface $expiresAt = null
     ): DrivePermission {
-        return $this->grant($fileId, $groupEmail, $role, DrivePermission::TYPE_GROUP);
+        return $this->grant($fileId, $groupEmail, $role, DrivePermission::TYPE_GROUP, $expiresAt);
+    }
+
+    /**
+     * Give an existing grant an expiry, or lift the one it has.
+     *
+     * The way to extend a contractor's access without re-sharing, and the way to make a
+     * lasting grant temporary after the fact.
+     */
+    public function setExpiry(string $fileId, string $permissionId, ?\DateTimeInterface $expiresAt): DrivePermission
+    {
+        $this->assertAccess($fileId);
+
+        $payload = new GooglePermission();
+        // Sent either way: an omitted field would leave the old expiry in place.
+        $payload->setExpirationTime($expiresAt === null ? null : $this->expiryFor($expiresAt));
+
+        $updated = $this->drive->permissions->update($fileId, $permissionId, $payload, [
+            'supportsAllDrives' => true,
+            'fields'            => 'id,emailAddress,role,type,displayName,expirationTime',
+        ]);
+
+        $this->forgetGrants($fileId);
+
+        $permission = $this->mapPermission($updated);
+        $this->dispatch(new AccessGrantedEvent($fileId, $permission));
+
+        return $permission;
+    }
+
+    /**
+     * An expiry in the format Drive wants, checked against the limits it documents: the time
+     * must be in the future and no more than a year ahead. Both are Google's own rules, and
+     * a 400 from them names neither the value nor the grant.
+     */
+    private function expiryFor(\DateTimeInterface $expiresAt): string
+    {
+        $now = new \DateTimeImmutable();
+
+        if ($expiresAt <= $now) {
+            throw new \InvalidArgumentException(sprintf(
+                'An expiry has to be in the future; %s is not.',
+                $expiresAt->format(\DateTimeInterface::RFC3339)
+            ));
+        }
+
+        if ($expiresAt > $now->modify('+1 year')) {
+            throw new \InvalidArgumentException(sprintf(
+                'Google takes an expiry no more than a year ahead; %s is further.',
+                $expiresAt->format(\DateTimeInterface::RFC3339)
+            ));
+        }
+
+        return $expiresAt->format(\DateTimeInterface::RFC3339);
     }
 
     public function revoke(string $fileId, string $permissionId): void
@@ -1502,6 +1664,8 @@ class DriveDocumentService
         $isFolder = $file->getMimeType() === self::FOLDER_MIME;
         $user     = $file->getLastModifyingUser();
         $size     = $file->getSize();
+        // A collection field, so empty rather than null when the item is not locked.
+        $locked   = $file->getContentRestrictions()[0] ?? null;
 
         return new DriveDocument(
             $file->getId(),
@@ -1518,6 +1682,8 @@ class DriveDocumentService
             $file->getThumbnailLink(),
             $user !== null ? ($user->getDisplayName() ?: $user->getEmailAddress()) : null,
             $this->mapCapabilities($file->getCapabilities()),
+            (bool) $locked?->getReadOnly(),
+            $locked?->getReadOnly() === true ? $locked->getReason() : null,
         );
     }
 
@@ -1538,6 +1704,49 @@ class DriveDocumentService
             (bool) $capabilities->getCanDownload(),
             (bool) $capabilities->getCanAddChildren(),
             (bool) $capabilities->getCanMoveItemWithinDrive(),
+        );
+    }
+
+    private function restrictContent(string $fileId, bool $readOnly, ?string $reason): DriveDocument
+    {
+        $this->assertAccess($fileId);
+
+        $restriction = new ContentRestriction();
+        $restriction->setReadOnly($readOnly);
+
+        if ($readOnly && $reason !== null) {
+            $restriction->setReason($reason);
+        }
+
+        $payload = new DriveFile();
+        $payload->setContentRestrictions([$restriction]);
+
+        $document = $this->mapFile($this->drive->files->update($fileId, $payload, [
+            'supportsAllDrives' => true,
+            'fields'            => self::FILE_FIELDS,
+        ]));
+
+        $this->dispatch(new DocumentLockChangedEvent($document, $readOnly, $readOnly ? $reason : null));
+
+        return $document;
+    }
+
+    private function mapChange(GoogleChange $change): DriveChange
+    {
+        $file    = $change->getFile();
+        $removed = (bool) $change->getRemoved();
+
+        // A change that is not a removal drops the cached sharing of that item: whatever
+        // happened to it in Drive, what we remember about who can see it is now a guess.
+        if (!$removed) {
+            $this->forgetGrants((string) $change->getFileId());
+        }
+
+        return new DriveChange(
+            (string) $change->getFileId(),
+            $removed,
+            $change->getTime(),
+            $removed || $file === null ? null : $this->mapFile($file),
         );
     }
 
@@ -1600,6 +1809,7 @@ class DriveDocumentService
             $permission->getDisplayName(),
             $inherited,
             $inheritedFrom,
+            $permission->getExpirationTime(),
         );
     }
 
@@ -1933,6 +2143,15 @@ class DriveDocumentService
     {
         if ($this->sharedDriveId === '') {
             throw new NotConfiguredException('shared_drive_id is not configured.');
+        }
+
+        // It is interpolated into every Drive query, so it is held to the same alphabet as
+        // any other id — checked once here rather than trusted because it came from config.
+        if (preg_match('/^[A-Za-z0-9_-]+$/', $this->sharedDriveId) !== 1) {
+            throw new NotConfiguredException(sprintf(
+                'shared_drive_id "%s" is not a Google Drive id.',
+                $this->sharedDriveId
+            ));
         }
     }
 }

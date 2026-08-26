@@ -37,6 +37,9 @@ This bundle implements the second option: file management, folder navigation, sh
   dropdowns, filters, protected formula columns
 - **Trash and restore** items, browse the trash, or erase for good — accidental deletions stay recoverable
 - **Version history** — list what Drive kept, pin what matters, fetch old content back
+- **Access that expires by itself**, for contractors and anyone else who should not keep it
+- **Lock a finished document** so nobody edits the approved version by accident
+- **Notice work done directly in Google**, so the sharing cache stops going stale
 - **Embed the native Google editor** via the `webViewLink` of each document
 - **Manage sharing**: list, grant and revoke access per file or folder (`reader` / `commenter` / `writer`), for individual users or **Google groups**
 - **Per-user visibility**: users only see the items shared with them; administrators see everything
@@ -106,6 +109,23 @@ bin/console google-drive-docs:authorize "<code>"
 ```
 
 The command prints a refresh token. Store it as a secret — it is what lets the bundle talk to Google.
+
+## Checking the setup
+
+Nothing else here answers the question "is this actually configured right?", so:
+
+```bash
+bin/console google-drive-docs:check
+```
+
+Four checks, each one call, each reporting on its own so a half-working setup says which half:
+the credentials (and who they authenticate as), whether the Shared Drive is reachable, what the
+service user may do on it, and whether the root actually lists. It is read-only — it never writes
+to the drive.
+
+The check worth reading twice is the third. Added to the drive as **Content manager**, the service
+user may trash but not erase, so `deleteForever()` will fail much later and for a reason that is
+hard to guess. The command says so up front.
 
 ## Configuration
 
@@ -195,6 +215,11 @@ $this->drive->grant($folder->id, 'user@example.com', 'writer');
 $this->drive->grantToGroup($folder->id, 'portugal@example.com', 'writer'); // whole team at once
 $this->drive->revoke($doc->id, $permissionId);
 $this->drive->roleOf($doc->id);                            // 'reader' | 'writer' | ... | null
+$this->drive->setExpiry($doc->id, $permissionId, new DateTimeImmutable('+30 days'));
+
+// Freezing a finished document
+$this->drive->lock($doc->id, 'Approved by finance');
+$this->drive->unlock($doc->id);
 $this->drive->grantAsService($doc->id, $email, 'writer');  // the application acting, not the viewer
 
 // Embed in your UI
@@ -539,6 +564,7 @@ invalidation live in your application instead of in the bundle:
 | `DocumentPropertiesChangedEvent` | the application's metadata on an item changes | `properties` |
 | `RevisionKeptEvent` | a version is pinned or released | `revisionId`, `kept` |
 | `RevisionDeletedEvent` | a version is removed from the history | `revisionId` |
+| `DocumentLockChangedEvent` | an item is locked or released | `document`, `locked`, `reason` |
 | `DocumentRenamedEvent` | an item is renamed | `document` |
 | `DocumentMovedEvent` | an item is moved | `document`, `fromParentId`, `toParentId` |
 | `DocumentTrashedEvent` | an item is moved to the trash | `document` |
@@ -891,6 +917,79 @@ Exporting is a read operation: it dispatches no event.
   Google answers 403 and the bundle raises `InsufficientDriveRoleException` explaining the fix.
 - **Both operations require access to the item**, exactly like `rename()` and `move()`.
 
+## Access that expires
+
+Sharing with someone who should not keep the access — a contractor, an auditor — usually means
+remembering to revoke it later. Drive can forget on its own:
+
+```php
+$this->drive->grant($doc->id, 'auditor@example.com', 'reader', expiresAt: new DateTimeImmutable('+30 days'));
+$this->drive->grantToGroup($folder->id, 'audit@example.com', 'reader', new DateTimeImmutable('+7 days'));
+
+// Extend, or make a lasting grant temporary after the fact
+$this->drive->setExpiry($doc->id, $permissionId, new DateTimeImmutable('+90 days'));
+$this->drive->setExpiry($doc->id, $permissionId, null);   // lift it again
+```
+
+`listPermissions()` reports it: `$permission->expiresAt` is the RFC 3339 time, and
+`$permission->expires()` the question you usually want to ask.
+
+Google's own restrictions are checked before the call, because a Drive 400 names neither the value
+nor the grant: the time must be **in the future** and **no more than a year ahead**, and an expiry
+can only sit on a user or group grant — which is all this bundle hands out anyway.
+
+## Locking a finished document
+
+An approved report should stop being editable, and "please don't touch it" is not a mechanism:
+
+```php
+$this->drive->lock($doc->id, 'Approved by finance');   // the reason Google shows the editor
+$this->drive->unlock($doc->id);
+```
+
+A locked item reports `$document->locked` and `$document->lockReason`, and its `capabilities`
+turn `canEdit` off — so a UI built on capabilities greys the right buttons without being told
+about locking at all. The service user can always lift it again.
+
+## Keeping up with changes made in Google
+
+Sharing lives in Google, which means it can change without this bundle being involved: someone
+adds a collaborator from the Drive UI, someone renames a folder by hand. Until now the sharing
+cache noticed such things only when it expired. Polling closes that:
+
+```php
+// Once, when you start watching
+$token = $this->drive->startPageToken();
+
+// Then on a schedule
+$changes = $this->drive->changesSince($token);
+
+foreach ($changes as $change) {
+    $change->fileId;
+    $change->removed;      // deleted, or moved out of what the service user can see
+    $change->document;     // the item as it stands now, or null when it is gone
+}
+
+$token = $changes->nextToken;   // store this — the next poll starts here
+```
+
+Every change seen this way **drops that item's cached sharing immediately**, which is the point:
+a share added by hand in Drive is picked up on the next poll rather than whenever the TTL happens
+to run out.
+
+Three things the contract depends on:
+
+- **Store `nextToken` yourself.** The bundle has nowhere to keep it. Polling with a token you
+  already used replays those changes; polling with one you never received loses whatever happened
+  in between.
+- **Every page is walked before the token comes back**, so it is always the end of a complete
+  batch — storing a token from the middle of a batch would lose the rest.
+- **Google ending a list without a new token is an error here**, not silence. Quietly reusing the
+  old one would replay the same changes for ever, so it raises `UnexpectedDriveStateException`.
+
+Push notifications (`changes.watch`) are deliberately not wrapped: they need a public HTTPS
+endpoint with a valid certificate, which belongs to the application rather than to a library.
+
 ## How sharing behaves (worth knowing)
 
 - **Inheritance is recursive.** Access granted on a folder applies to every sub-folder and file inside it, at any depth.
@@ -941,8 +1040,9 @@ google_drive_docs:
 ```
 
 Grants and revocations made through the bundle clear the affected entry immediately, so the
-UI never shows stale access. Changes made **directly in Google** are picked up only after the
-TTL expires — keep it short if people also share from the Drive interface.
+UI never shows stale access. Changes made **directly in Google** used to wait for the TTL; poll
+`changesSince()` and they clear the affected entry too — see "Keeping up with changes made in
+Google". Without polling, keep the TTL short if people also share from the Drive interface.
 
 Caching is entirely optional: with no pool configured the bundle simply queries Google every
 time. If the configured pool does not exist, the application still boots — you get a warning
