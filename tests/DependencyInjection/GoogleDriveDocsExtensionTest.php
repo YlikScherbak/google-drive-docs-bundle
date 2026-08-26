@@ -28,6 +28,15 @@ final class GoogleDriveDocsExtensionTest extends TestCase
         self::assertTrue($container->hasDefinition(GoogleClientFactory::class));
         self::assertTrue($container->hasDefinition(DriveDocumentService::class));
         self::assertTrue($container->hasDefinition('google_drive_docs.drive'));
+
+        // The factory that builds the client asks Google for a token, so deferring it is what
+        // keeps a request that never touches Drive from paying for one. Asserted on the
+        // definition rather than the instance: a ContainerBuilder resolves lazy services eagerly,
+        // and only a dumped container hands back the proxy.
+        self::assertTrue(
+            $container->getDefinition('google_drive_docs.client')->isLazy(),
+            'a request that does not touch Drive would pay for an OAuth round trip'
+        );
         self::assertTrue($container->hasAlias(ViewerContextInterface::class));
         self::assertTrue($container->hasAlias('google_drive_docs.service'));
     }

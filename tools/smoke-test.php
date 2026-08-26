@@ -546,18 +546,19 @@ try {
             $token = $drive->startPageToken();
             $drive->rename($sheetId, PREFIX . 'sheet_' . $stamp . '_renamed');
 
-            // The feed is eventually consistent; give it a few tries rather than one.
-            for ($attempt = 0; $attempt < 6; ++$attempt) {
-                $changes = $drive->changesSince($token);
+            // The feed lags like the other Drive indexes do, so it waits the same way they do.
+            // It had its own shorter loop until that loop went off on a slow day, which is what a
+            // flaky check in a suite meant to be trusted looks like.
+            $changes = null;
 
-                if ($changes->changes !== []) {
-                    break;
-                }
+            assertTrue(
+                eventually(static function () use ($drive, $token, &$changes): bool {
+                    $changes = $drive->changesSince($token);
 
-                sleep(2);
-            }
-
-            assertTrue($changes->changes !== [], 'the feed stayed empty after 12s');
+                    return $changes->changes !== [];
+                }),
+                'the feed stayed empty'
+            );
 
             foreach ($changes->changes as $change) {
                 assertTrue($change->fileId !== '', 'a change came back with an empty fileId — a drive-level entry leaked');

@@ -1274,6 +1274,33 @@ google_drive_docs:
         ttl: 300
 ```
 
+### The client is lazy, so a request that ignores Drive costs nothing
+
+Authenticating means asking Google for an access token, and that happens while the client is being
+built. Without deferring it, every request to a controller that holds `DriveDocumentService` pays
+for a token whether it calls Drive or not — a controller with five actions where two use Drive
+would spend it on the other three.
+
+The client service is therefore declared lazy. Measured in a compiled container:
+
+| | lazy | eager |
+| ---------------------------------- | ----------- | ----------- |
+| fetching `DriveDocumentService`    | **1.9 ms**  | **242.9 ms** |
+| what `Drive` receives              | a proxy, not yet initialised | the client |
+| the first call that reaches Google | 719 ms      | 458 ms      |
+
+Read that table carefully: this **defers** the token request, it does not remove it. The first call
+that actually reaches Drive pays for it, so a request that does use Drive is no faster. What changes
+is that a request which never touches Drive stops paying at all.
+
+Two notes for anyone reading the container. The flag only takes effect in a **compiled** container,
+which is what a Symfony application has; a raw `ContainerBuilder` resolves lazy services eagerly, so
+the bundle's own test asserts the definition rather than the instance. And the client is the right
+thing to defer while `Drive` is not: `Google\Service`'s constructor only type-checks its argument,
+so it accepts the proxy without waking it, and the client has no public properties — every access
+goes through a method, which is what a virtual proxy forwards. `Drive` exposes its resources as
+twenty-two public properties, and those would defeat the same trick.
+
 Grants and revocations made through the bundle clear the affected entry immediately, so the
 UI never shows stale access. Changes made **directly in Google** used to wait for the TTL; poll
 `changesSince()` and they clear the affected entry too — see "Keeping up with changes made in

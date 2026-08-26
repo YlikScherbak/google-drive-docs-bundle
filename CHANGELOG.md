@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The Google client is built lazily.** Authenticating asks Google for an access token, and that
+  happened while the client was being constructed — so every request to a controller holding
+  `DriveDocumentService` paid for a token whether it called Drive or not. Measured in a compiled
+  container: fetching the service takes 1.9 ms lazily against 242.9 ms eagerly.
+
+  It defers the token request rather than removing it: the first call that reaches Drive pays for it,
+  so a request that does use Drive is no faster. What changes is that a request which never touches
+  Drive stops paying at all.
+
+  Verified through the paths where proxying could plausibly break, against the live API and beside a
+  plain client for comparison: a resource call, `export()`, `exportRevision()` through `authorize()`,
+  a resumable upload over 5 MB, and the retry configuration read back. Byte-identical results, and
+  the initializer runs exactly once. The client is the right thing to defer and `Drive` is not —
+  `Google\Service`'s constructor only type-checks its argument, and the client has no public
+  properties, while `Drive` exposes its resources as twenty-two
+
+### Fixed
+- The live test's changes-feed check had a shorter wait of its own than the two checks beside it,
+  and went off on a slow day. Drive's feed lags the way its other indexes do, so it now waits the
+  same way they do — a flaky check in a suite meant to be trusted is worse than no check
+
 ## [1.0.8] - 2026-08-26
 
 ### Documentation
