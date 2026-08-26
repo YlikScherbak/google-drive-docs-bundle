@@ -97,10 +97,16 @@ final class DriveDocumentResolverTest extends TestCase
 
         $argument = new ArgumentMetadata($name, $type, false, false, null);
 
-        return iterator_to_array(
-            (new DriveDocumentResolver($this->drive))->resolve($request, $argument),
-            false
-        );
+        $resolved = [];
+
+        // Collected by hand rather than with iterator_to_array(): resolve() returns an
+        // iterable, which is an array here, and on PHP 8.1 that function still insists on a
+        // Traversable.
+        foreach ((new DriveDocumentResolver($this->drive))->resolve($request, $argument) as $document) {
+            $resolved[] = $document;
+        }
+
+        return $resolved;
     }
 
     private function document(string $id = 'doc-1'): DriveDocument

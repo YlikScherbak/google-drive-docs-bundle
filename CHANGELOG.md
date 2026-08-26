@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The test suite ran on PHP 8.1 again. `DriveDocumentResolverTest` collected the resolver's
+  answer with `iterator_to_array()`, which only accepts a plain array from PHP 8.2 onwards, so
+  six tests errored on the oldest PHP this bundle supports. The bundle itself was unaffected —
+  only its suite — and the CI job added in 0.7.1 to run against the lowest dependencies is what
+  caught it
+
 ## [1.0.0] - 2026-08-26
 
 The public API is settled. From here on, minor releases add and only a major one removes — see
