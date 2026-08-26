@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-08-26
+
 ### Added
 - **The live test now covers the authorization boundary**, which was its most conspicuous gap: the
   voter and the resolver are the newest code in the bundle and the most security-critical, and the
@@ -601,7 +603,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.6...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.7...HEAD
+[1.0.7]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.3...v1.0.4
