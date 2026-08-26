@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-26
+
 ### Fixed
 - Resumable upload declared the wrong total when a file's stat could not be trusted. A stat
   answering `false` — or `0`, as a network mount or a stream wrapper can — sent the upload down
@@ -342,7 +344,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.4.0...v0.5.0
