@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-26
+
 ### Fixed
 - The test suite ran on PHP 8.1 again. `DriveDocumentResolverTest` collected the resolver's
   answer with `iterator_to_array()`, which only accepts a plain array from PHP 8.2 onwards, so
@@ -451,7 +453,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v0.7.1...v0.8.0
