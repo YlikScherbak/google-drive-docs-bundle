@@ -310,6 +310,20 @@ costs one Drive call — the same one the controller would have made, moved earl
 the access check, so an id the viewer may not reach raises `AccessDeniedException` before the
 controller body runs. That is the reason to resolve rather than take the id from the request.
 
+Mind the `id` fallback on routes where `{id}` names something else — an order, a customer:
+
+```php
+#[Route('/orders/{id}/attachment/{fileId}')]
+public function attachment(Order $order, DriveDocument $document): Response  // fine: fileId is there
+
+#[Route('/orders/{id}/attachment')]
+public function attachment(int $id, DriveDocument $document): Response       // {id} is the order, not a file
+```
+
+In the second shape the resolver would hand the order's id to Drive and answer 403. Name the
+argument after its parameter, or give the route a `{fileId}`; the fallback exists for the common
+case of a single `{id}` that *is* the file.
+
 ## Several Shared Drives
 
 One drive is the common case and stays the configuration's business. A second workspace — a
@@ -852,8 +866,10 @@ $this->sheets->write($fileId, 'Q3!A1', $rows);
 ```
 
 For a Google format there are no stored bytes, so a revision offers export links instead and the
-MIME type picks between them — `DriveExport::XLSX` round-trips formulas, `CSV` does not. An
-uploaded file has bytes, and `exportRevision()` hands them back as they are.
+MIME type picks between them — `DriveExport::XLSX` round-trips formulas, `CSV` does not. Name it
+whenever a revision offers more than one; Google's order is not a contract, so there is no
+"default" to fall back on. An uploaded file has bytes, and `exportRevision()` hands them back as
+they are, whatever is asked for.
 
 **The list can be incomplete.** Google's own documentation says older revisions are omitted for
 files with a long history — frequently edited Sheets and Docs especially — and that the history
@@ -861,7 +877,10 @@ shown in the Workspace editor may be more complete than the API's. Treat this as
 not an audit trail, and pin the versions that matter with `keepRevision()` while they are still
 listed. Only a limited number of revisions may be pinned per file.
 
-Deleting a revision is final: there is no trash for one.
+Deleting a revision is final: there is no trash for one. Drive also refuses two kinds of it, with
+its own 403: the current version of any file, and any version of a Google format — Docs and Sheets
+keep their history for the editor alone. What can be deleted is the older versions of an uploaded
+file, which is also where the storage they occupy matters.
 
 ## Linking documents to your own records
 
@@ -1003,6 +1022,11 @@ Google's own restrictions are checked before the call, because a Drive 400 names
 nor the grant: the time must be **in the future** and **no more than a year ahead**, and an expiry
 can only sit on a user or group grant — which is all this bundle hands out anyway.
 
+The sharing cache respects it: an entry that holds an expiring grant lives no longer than that
+grant, whatever `permission_cache.ttl` says, and a grant Drive has not got round to removing yet
+counts as gone the moment its time is up. Access ends when you said it would, not when the cache
+happens to expire.
+
 ## Locking a finished document
 
 An approved report should stop being editable, and "please don't touch it" is not a mechanism:
@@ -1054,6 +1078,13 @@ Three things the contract depends on:
 
 Push notifications (`changes.watch`) are deliberately not wrapped: they need a public HTTPS
 endpoint with a valid certificate, which belongs to the application rather than to a library.
+
+**This is the drive's feed, not a viewer's.** It is not filtered by `ViewerContextInterface`: every
+item the service user can see is in it, with its name, link and who last edited it. Run it from a
+scheduled job and keep its output on the server side — never hand it to a request made on a
+viewer's behalf, where it would show them documents they cannot reach. Changes to the drive itself
+(a rename, a new restriction) are in the raw feed too and are skipped here, so every `DriveChange`
+is about a file.
 
 ## How sharing behaves (worth knowing)
 

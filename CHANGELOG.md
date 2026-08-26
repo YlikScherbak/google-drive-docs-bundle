@@ -6,6 +6,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `setExpiry($fileId, $permissionId, null)` did not lift the expiry. The Google client drops a PHP
+  `null` when it serialises a request body, so the field never reached Drive, and `permissions.update`
+  being a PATCH, an absent field means "keep the old value" — the grant kept expiring when it always
+  had. The placeholder the client provides for a JSON `null` is now used, and the test reads the
+  serialised body rather than the object's getter, which is how the omission went unnoticed
+- A grant with an expiry could outlive it in the sharing cache: an entry was kept for the full
+  `permission_cache.ttl` however soon the grant ran out, so a viewer kept their access for up to
+  the TTL after Drive had dropped it. The entry now lives no longer than the soonest expiry among
+  the grants it holds, and a grant whose time is already up is ignored even while Drive still
+  lists it
+- `exportRevision()` streamed an error page as the document: the export links are fetched through
+  the client's own authorised HTTP client, which is built with `http_errors` off, so a 403 or a
+  5xx came back as the revision's content. Any status of 400 or above is now raised as a Google
+  exception carrying Drive's own message and reason
+- `changesSince()` reported changes to the Shared Drive itself — a rename, a new restriction — as
+  a `DriveChange` with an empty `fileId`, and cleared a cache entry under that empty key. The feed
+  carries them with a `changeType` of `drive`; they are now skipped, so every change is about a file.
+  That field is also asked for now: an unrequested field comes back null, so the check on it was
+  dead code quietly leaning on the empty-`fileId` test beside it — the two conditions are separate
+  on purpose and each is tested on its own
+- `setExpiry()` explains an inherited grant with `InheritedPermissionException`, as `revoke()`
+  already did, instead of passing on Drive's bare 403
+- `DriveVoter` abstains on an empty string as the subject instead of asking Google about the id
+  `""` and earning a 400
+
+### Changed
+- `exportRevision()` without a MIME type refuses a revision that offers several formats, naming
+  them, instead of taking whichever link Google listed first. Google's order is not a contract;
+  a revision offering one format still needs no choice, and an uploaded file's revision never did.
+
+  This is the one entry worth a second look before upgrading, because it refuses a call that used
+  to be accepted. It sits here as a fix rather than waiting for a major release: what it replaces
+  was an arbitrary pick from an order Google never promised, so it produced whichever format
+  happened to be first — nothing a caller could have depended on deliberately, and quietly wrong
+  when it was not the one they meant. Name the format and the call behaves as it always should
+  have
+- Documentation: `changesSince()` is the drive's feed and is not filtered per viewer; the `id`
+  fallback of `DriveDocumentResolver` on routes where `{id}` is something else; what Drive
+  refuses to `deleteRevision()`; the sharing cache and expiring grants; `DRIVE_EDIT` also
+  covers `lock()` and the application's own metadata
+
 ## [1.0.1] - 2026-08-26
 
 ### Fixed

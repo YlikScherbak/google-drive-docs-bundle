@@ -87,6 +87,23 @@ final class DriveDocumentServiceChangesTest extends TestCase
         self::assertSame('2026-08-26T10:00:00.000Z', $change->time);
     }
 
+    public function testAChangeToTheDriveItselfIsNotReportedAsAFile(): void
+    {
+        // Renaming the Shared Drive shows up in the same feed, with no fileId at all. It is
+        // not a document change and must neither be listed as one nor touch the cache.
+        $driveChange = new Change(['changeType' => 'drive', 'time' => '2026-08-26T10:00:00.000Z']);
+        $driveChange->setDriveId(self::DRIVE_ID);
+
+        $this->changes->method('listChanges')->willReturn(
+            $this->changeList([$driveChange, $this->change('doc-1', 'Kept')], newStartPageToken: 'T-101')
+        );
+
+        $changes = $this->service()->changesSince('T-100');
+
+        self::assertCount(1, $changes);
+        self::assertSame('doc-1', $changes->changes[0]->fileId);
+    }
+
     public function testEveryPageIsWalkedBeforeTheTokenIsReturned(): void
     {
         $calls = 0;
@@ -133,6 +150,44 @@ final class DriveDocumentServiceChangesTest extends TestCase
         $this->expectExceptionMessageMatches('/token/');
 
         $this->service()->changesSince('T-100');
+    }
+
+    public function testTheFeedIsAskedForTheFieldItFiltersOn(): void
+    {
+        // Drive-level entries are skipped by their changeType, so that field has to be
+        // requested: an unasked-for field comes back null and the check reads as dead code
+        // while quietly leaning on the empty-fileId fallback beside it.
+        $captured = null;
+        $this->changes->method('listChanges')->willReturnCallback(
+            function (string $token, array $params) use (&$captured): ChangeList {
+                $captured = $params['fields'];
+
+                return $this->changeList([], newStartPageToken: 'T-101');
+            }
+        );
+
+        $this->service()->changesSince('T-100');
+
+        self::assertStringContainsString('changeType', $captured);
+    }
+
+    public function testADriveLevelChangeIsSkippedEvenWithAFileIdPresent(): void
+    {
+        // The two conditions are separate on purpose: this one proves the changeType check
+        // carries its own weight rather than riding on the empty id beside it.
+        $drive = new Change([
+            'fileId'     => 'doc-1',
+            'changeType' => 'drive',
+            'time'       => '2026-08-26T10:00:00.000Z',
+        ]);
+        $this->changes->method('listChanges')->willReturn(
+            $this->changeList([$drive, $this->change('doc-2', 'Two')], newStartPageToken: 'T-101')
+        );
+
+        $changes = $this->service()->changesSince('T-100');
+
+        self::assertCount(1, $changes->changes);
+        self::assertSame('doc-2', $changes->changes[0]->fileId);
     }
 
     public function testChangesAreScopedToTheConfiguredDrive(): void

@@ -40,7 +40,7 @@ final class DriveVoter extends Voter
     /** Reachable at all: shared with the viewer, or with a folder above it. */
     public const VIEW = 'DRIVE_VIEW';
 
-    /** Rename, move, trash, write cells. */
+    /** Rename, move, trash, lock, write cells, change the application's own metadata. */
     public const EDIT = 'DRIVE_EDIT';
 
     /** Grant and revoke access. */
@@ -68,7 +68,7 @@ final class DriveVoter extends Voter
     protected function supports(string $attribute, mixed $subject): bool
     {
         return in_array($attribute, self::ATTRIBUTES, true)
-            && ($subject instanceof DriveDocument || is_string($subject));
+            && ($subject instanceof DriveDocument || (is_string($subject) && $subject !== ''));
     }
 
     protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token): bool

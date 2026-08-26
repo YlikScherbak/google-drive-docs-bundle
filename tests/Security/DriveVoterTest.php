@@ -134,6 +134,12 @@ final class DriveVoterTest extends TestCase
         self::assertSame(VoterInterface::ACCESS_GRANTED, $this->vote(DriveVoter::EDIT, 'doc-1'));
     }
 
+    public function testAnEmptyIdIsAbstainedOnRatherThanAskedAboutAtGoogle(): void
+    {
+        // "" is not an id; asking Google would earn a 400 instead of a decision.
+        self::assertSame(VoterInterface::ACCESS_ABSTAIN, $this->vote(DriveVoter::VIEW, ''));
+    }
+
     public function testSomethingElseEntirelyIsAbstainedOn(): void
     {
         self::assertSame(

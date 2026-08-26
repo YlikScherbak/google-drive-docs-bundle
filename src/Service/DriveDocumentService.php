@@ -35,6 +35,7 @@ use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePermission;
 use Borsche\GoogleDriveDocsBundle\Model\DriveRevision;
+use Google\Model as GoogleModel;
 use Google\Service\Drive;
 use Google\Http\MediaFileUpload;
 use Google\Service\Drive\DriveFile;
@@ -686,6 +687,11 @@ class DriveDocumentService
      * Store the returned nextToken and hand it back next time; the bundle has nowhere to keep
      * it. Every page is walked before returning, so the token is only ever the end of a
      * complete batch.
+     *
+     * This is the drive's feed, not the viewer's: it is not filtered by ViewerContext and
+     * describes every item the service user can see — names, links, who last edited what.
+     * Call it from the job that keeps your application in step with Drive, never from a
+     * request on a viewer's behalf.
      */
     public function changesSince(string $pageToken): DriveChanges
     {
@@ -705,10 +711,16 @@ class DriveDocumentService
                 'includeRemoved'            => true,
                 'pageSize'                  => 1000,
                 'fields'                    => 'nextPageToken, newStartPageToken, '
-                    . 'changes(fileId,removed,time,file(' . self::FILE_FIELDS . '))',
+                    . 'changes(changeType,fileId,removed,time,file(' . self::FILE_FIELDS . '))',
             ]);
 
             foreach ($response->getChanges() as $change) {
+                // The feed also carries changes to the drive itself — a rename, a new
+                // restriction — with no file behind them. Not a document change, so skipped.
+                if ($change->getChangeType() === 'drive' || !$change->getFileId()) {
+                    continue;
+                }
+
                 $changes[] = $this->mapChange($change);
             }
 
@@ -822,6 +834,11 @@ class DriveDocumentService
     /**
      * Remove a version from an item's history. There is no trash for a revision: what that
      * version held is gone.
+     *
+     * Drive refuses two things here, and both arrive as its own 403 rather than being
+     * second-guessed: the current version of any file, and any version of a Google format —
+     * Docs and Sheets keep their history for the editor alone. Only the older versions of an
+     * uploaded file can be deleted, which is also where the storage they take up matters.
      */
     public function deleteRevision(string $fileId, string $revisionId): void
     {
@@ -841,8 +858,12 @@ class DriveDocumentService
      * document, or read the values back into the live one with SpreadsheetService.
      *
      * A Google format has no stored bytes, so its revisions carry export links instead and
-     * $mimeType picks between them. An uploaded file has bytes, and they come back as they
-     * are whatever is asked for.
+     * $mimeType picks between them — required when there is more than one to pick from,
+     * since Google's order is not a contract. An uploaded file has bytes, and they come back
+     * as they are whatever is asked for.
+     *
+     * @throws \InvalidArgumentException for a format the revision does not offer, or none
+     *                                   named where several are offered
      */
     public function exportRevision(string $fileId, string $revisionId, ?string $mimeType = null): DriveExport
     {
@@ -852,6 +873,16 @@ class DriveDocumentService
         // Settled before the document is fetched for its name: a format this revision does
         // not offer is a caller's mistake, and it should not cost a round trip to say so.
         if ($revision->exportLinks !== []) {
+            // One link means one possible answer. Several mean the caller has to choose:
+            // Google's order is not a contract, and "the first" would change under them.
+            if ($mimeType === null && count($revision->exportLinks) > 1) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Revision "%s" is offered in several formats, so say which one: %s.',
+                    $revisionId,
+                    implode(', ', array_keys($revision->exportLinks))
+                ));
+            }
+
             $target = $mimeType ?? array_key_first($revision->exportLinks);
 
             if (!isset($revision->exportLinks[$target])) {
@@ -1023,20 +1054,36 @@ class DriveDocumentService
      * Give an existing grant an expiry, or lift the one it has.
      *
      * The way to extend a contractor's access without re-sharing, and the way to make a
-     * lasting grant temporary after the fact.
+     * lasting grant temporary after the fact. Reported through AccessGrantedEvent either way,
+     * carrying the grant as it now stands — a listener that keeps an audit trail sees one
+     * event per change to a grant, not one per grant.
+     *
+     * @throws InheritedPermissionException when the grant lives on a parent folder
      */
     public function setExpiry(string $fileId, string $permissionId, ?\DateTimeInterface $expiresAt): DrivePermission
     {
         $this->assertAccess($fileId);
 
         $payload = new GooglePermission();
-        // Sent either way: an omitted field would leave the old expiry in place.
-        $payload->setExpirationTime($expiresAt === null ? null : $this->expiryFor($expiresAt));
+        // Sent either way: permissions.update is a PATCH, so an omitted field leaves the old
+        // expiry in place. A PHP null is exactly what the Google client omits when it
+        // serialises; its NULL_VALUE placeholder is how a JSON null actually gets on the wire.
+        $payload->setExpirationTime($expiresAt === null ? GoogleModel::NULL_VALUE : $this->expiryFor($expiresAt));
 
-        $updated = $this->drive->permissions->update($fileId, $permissionId, $payload, [
-            'supportsAllDrives' => true,
-            'fields'            => 'id,emailAddress,role,type,displayName,expirationTime',
-        ]);
+        try {
+            $updated = $this->drive->permissions->update($fileId, $permissionId, $payload, [
+                'supportsAllDrives' => true,
+                'fields'            => 'id,emailAddress,role,type,displayName,expirationTime',
+            ]);
+        } catch (GoogleServiceException $e) {
+            if ($this->hasReason($e, ['cannotDeletePermission', 'cannotModifyInheritedPermission'])) {
+                throw new InheritedPermissionException(
+                    'This permission is inherited from a parent folder. Change its expiry on that folder instead.'
+                );
+            }
+
+            throw $e;
+        }
 
         $this->forgetGrants($fileId);
 
@@ -1044,6 +1091,22 @@ class DriveDocumentService
         $this->dispatch(new AccessGrantedEvent($fileId, $permission));
 
         return $permission;
+    }
+
+    /**
+     * The Unix time a grant runs out, or null for a lasting one or a time Drive sent in a
+     * form that cannot be read — which is treated as lasting rather than as expired, since
+     * hiding a document over a parsing quirk would be the worse mistake.
+     */
+    private function expiryTimestamp(?string $rfc3339): ?int
+    {
+        if ($rfc3339 === null || $rfc3339 === '') {
+            return null;
+        }
+
+        $timestamp = strtotime($rfc3339);
+
+        return $timestamp === false ? null : $timestamp;
     }
 
     /**
@@ -1535,6 +1598,10 @@ class DriveDocumentService
         $grants    = [];
         $pageToken = null;
         $pages     = 0;
+        $now       = time();
+        // The soonest a grant seen here runs out, if any does: the cache entry must not
+        // outlive it, or the viewer keeps their access for as long as the TTL pretends.
+        $soonest = null;
 
         try {
             do {
@@ -1542,7 +1609,7 @@ class DriveDocumentService
 
                 $params = [
                     'supportsAllDrives' => true,
-                    'fields'            => 'nextPageToken, permissions(emailAddress,type,role)',
+                    'fields'            => 'nextPageToken, permissions(emailAddress,type,role,expirationTime)',
                     'pageSize'          => 100,
                 ];
 
@@ -1556,6 +1623,18 @@ class DriveDocumentService
                     if (!in_array($permission->getType(), self::ALLOWED_TYPES, true)
                         || !$permission->getEmailAddress()) {
                         continue;
+                    }
+
+                    $expires = $this->expiryTimestamp($permission->getExpirationTime());
+
+                    // Google removes an expired grant eventually, not instantly. Until it
+                    // does, the list may still carry it; it opens nothing here.
+                    if ($expires !== null && $expires <= $now) {
+                        continue;
+                    }
+
+                    if ($expires !== null) {
+                        $soonest = $soonest === null ? $expires : min($soonest, $expires);
                     }
 
                     $email = $this->normalizeEmail($permission->getEmailAddress());
@@ -1573,8 +1652,14 @@ class DriveDocumentService
         }
 
         if ($item !== null) {
+            $lifetime = $this->permissionCacheTtl;
+
+            if ($soonest !== null) {
+                $lifetime = max(1, min($lifetime, $soonest - $now));
+            }
+
             $item->set($grants);
-            $item->expiresAfter($this->permissionCacheTtl);
+            $item->expiresAfter($lifetime);
             $this->permissionCache?->save($item);
         }
 
@@ -1804,6 +1889,23 @@ class DriveDocumentService
     private function fetchAuthorized(string $url): StreamInterface
     {
         $response = $this->drive->getClient()->authorize()->request('GET', $url, ['stream' => true]);
+
+        // That client is built with http_errors off, so an error page would stream back as
+        // if it were the document. Turned into the same exception a service call would raise.
+        if ($response->getStatusCode() >= 400) {
+            $body   = (string) $response->getBody();
+            $decoded = json_decode($body, true);
+            $error   = is_array($decoded) ? ($decoded['error'] ?? []) : [];
+
+            throw new GoogleServiceException(
+                is_array($error) && isset($error['message']) && is_string($error['message'])
+                    ? $error['message']
+                    : sprintf('Fetching %s answered HTTP %d.', $url, $response->getStatusCode()),
+                $response->getStatusCode(),
+                null,
+                is_array($error) && isset($error['errors']) && is_array($error['errors']) ? $error['errors'] : []
+            );
+        }
 
         return $response->getBody();
     }

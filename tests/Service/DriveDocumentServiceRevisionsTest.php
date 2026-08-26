@@ -24,6 +24,7 @@ use Google\Service\Drive\Resource\Revisions;
 use Google\Service\Drive\Revision;
 use Google\Service\Drive\RevisionList;
 use Google\Service\Drive\User;
+use Google\Service\Exception as GoogleServiceException;
 use GuzzleHttp\ClientInterface as HttpClientInterface;
 use GuzzleHttp\Psr7\Response as HttpResponse;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -233,6 +234,29 @@ final class DriveDocumentServiceRevisionsTest extends TestCase
         self::assertSame('Q3 report.xlsx', $export->filename);
     }
 
+    public function testAnExportLinkThatAnswersWithAnErrorIsNotHandedOutAsTheDocument(): void
+    {
+        // The authorised HTTP client is built with http_errors off, so a 403 page would
+        // otherwise stream back as if it were the old spreadsheet.
+        $this->revisions->method('get')->willReturn(new Revision([
+            'id'          => 'r1',
+            'mimeType'    => self::SPREADSHEET,
+            'exportLinks' => [DriveExport::XLSX => 'https://export.example/r1.xlsx'],
+        ]));
+        $this->files->method('get')->willReturn($this->file('doc', 'Q3 report'));
+
+        $http = $this->createMock(HttpClientInterface::class);
+        $http->method('request')->willReturn(new HttpResponse(403, ['content-type' => 'application/json'], json_encode([
+            'error' => ['code' => 403, 'message' => 'The user does not have sufficient permissions.', 'errors' => [['reason' => 'insufficientFilePermissions']]],
+        ])));
+        $this->client->method('authorize')->willReturn($http);
+
+        $this->expectException(GoogleServiceException::class);
+        $this->expectExceptionCode(403);
+
+        $this->service()->exportRevision('doc', 'r1', DriveExport::XLSX);
+    }
+
     public function testExportingAPlainFileRevisionDownloadsItsBytes(): void
     {
         $this->revisions->method('get')->willReturnCallback(
@@ -250,6 +274,42 @@ final class DriveDocumentServiceRevisionsTest extends TestCase
 
         self::assertSame('old-pdf-bytes', $export->contents());
         self::assertSame('application/pdf', $export->mimeType);
+    }
+
+    public function testExportingAGoogleDocumentRevisionNeedsAFormatWhenSeveralAreOffered(): void
+    {
+        // Google's order of export links is not a contract; picking "the first" would hand
+        // back a different format from one day to the next.
+        $this->revisions->method('get')->willReturn(new Revision([
+            'id'          => 'r1',
+            'mimeType'    => self::SPREADSHEET,
+            'exportLinks' => [
+                DriveExport::CSV  => 'https://export.example/r1.csv',
+                DriveExport::XLSX => 'https://export.example/r1.xlsx',
+            ],
+        ]));
+        $this->files->expects(self::never())->method('get');
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/text\/csv.*spreadsheetml/s');
+
+        $this->service()->exportRevision('doc', 'r1');
+    }
+
+    public function testExportingAGoogleDocumentRevisionWithOneFormatNeedsNoChoice(): void
+    {
+        $this->revisions->method('get')->willReturn(new Revision([
+            'id'          => 'r1',
+            'mimeType'    => self::SPREADSHEET,
+            'exportLinks' => [DriveExport::XLSX => 'https://export.example/r1.xlsx'],
+        ]));
+        $this->files->method('get')->willReturn($this->file('doc', 'Q3 report'));
+
+        $http = $this->createMock(HttpClientInterface::class);
+        $http->method('request')->willReturn(new HttpResponse(200, [], 'bytes'));
+        $this->client->method('authorize')->willReturn($http);
+
+        self::assertSame(DriveExport::XLSX, $this->service()->exportRevision('doc', 'r1')->mimeType);
     }
 
     public function testExportingRefusesAFormatTheRevisionDoesNotOffer(): void

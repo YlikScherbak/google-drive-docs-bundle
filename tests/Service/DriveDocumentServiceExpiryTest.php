@@ -7,17 +7,24 @@ namespace Borsche\GoogleDriveDocsBundle\Tests\Service;
 use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
 use Borsche\GoogleDriveDocsBundle\Event\AccessGrantedEvent;
+use Borsche\GoogleDriveDocsBundle\Exception\InheritedPermissionException;
 use Borsche\GoogleDriveDocsBundle\Exception\NotConfiguredException;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePermission;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Tests\CollectingEventDispatcher;
+use Borsche\GoogleDriveDocsBundle\Tests\FakeViewerContext;
 use Google\Service\Drive;
+use Google\Service\Drive\DriveFile;
 use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Drive\PermissionList;
+use Google\Service\Exception as GoogleServiceException;
 use Google\Service\Drive\Resource\Files;
 use Google\Service\Drive\Resource\Permissions;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
+use Psr\Cache\CacheItemInterface;
+use Psr\Cache\CacheItemPoolInterface;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 
 final class DriveDocumentServiceExpiryTest extends TestCase
 {
@@ -179,9 +186,15 @@ final class DriveDocumentServiceExpiryTest extends TestCase
         $this->service()->setExpiry('doc', 'perm-1', $expires);
         self::assertSame($expires->format(\DateTimeInterface::RFC3339), $payload->getExpirationTime());
 
-        // Null lifts the expiry; Drive wants the field cleared rather than omitted.
+        // Null lifts the expiry, and the JSON that reaches Drive is what decides whether it
+        // does: permissions.update is a PATCH, so a field left out of the body means "keep the
+        // old value". The Google client drops PHP nulls when it serialises, which is why this
+        // looks at the wire format rather than at the getter.
         $this->service()->setExpiry('doc', 'perm-1', null);
-        self::assertNull($payload->getExpirationTime());
+
+        $wire = json_decode(json_encode($payload->toSimpleObject(), JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
+        self::assertArrayHasKey('expirationTime', $wire, 'the field has to travel, or the old expiry stays');
+        self::assertNull($wire['expirationTime']);
     }
 
     public function testSettingAnExpiryForgetsTheCachedSharing(): void
@@ -193,6 +206,88 @@ final class DriveDocumentServiceExpiryTest extends TestCase
         self::assertSame('doc', $this->dispatcher->single(AccessGrantedEvent::class)->fileId);
     }
 
+    public function testACachedGrantNeverOutlivesItsExpiry(): void
+    {
+        // The pool would keep the entry for the full TTL, long after Google dropped the grant;
+        // the lifetime asked for has to be the time left on the grant instead.
+        $this->files->method('get')->willReturn(new DriveFile(['id' => 'doc', 'parents' => [self::DRIVE_ID]]));
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([
+            ['viewer@example.com', (new \DateTimeImmutable('+60 seconds'))->format(\DateTimeInterface::RFC3339)],
+        ]));
+
+        $lifetime = null;
+        $item     = $this->createMock(CacheItemInterface::class);
+        $item->method('isHit')->willReturn(false);
+        $item->method('set')->willReturnSelf();
+        $item->method('expiresAfter')->willReturnCallback(
+            function (mixed $time) use (&$lifetime, $item): CacheItemInterface {
+                $lifetime = $time;
+
+                return $item;
+            }
+        );
+        $pool = $this->createMock(CacheItemPoolInterface::class);
+        $pool->method('getItem')->willReturn($item);
+
+        $service = $this->service(new FakeViewerContext('viewer@example.com'), pool: $pool, ttl: 300);
+
+        self::assertTrue($service->canAccess('doc'));
+        self::assertIsInt($lifetime);
+        self::assertLessThanOrEqual(60, $lifetime, 'the entry must go when the grant goes');
+        self::assertGreaterThan(0, $lifetime);
+    }
+
+    public function testAGrantThatAlreadyExpiredDoesNotCount(): void
+    {
+        // Google removes an expired grant eventually, not instantly; until it does, the list
+        // may still carry it, and it must not open anything.
+        $this->files->method('get')->willReturn(new DriveFile(['id' => 'doc', 'parents' => [self::DRIVE_ID]]));
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([
+            ['viewer@example.com', (new \DateTimeImmutable('-1 minute'))->format(\DateTimeInterface::RFC3339)],
+        ]));
+
+        self::assertFalse($this->service(new FakeViewerContext('viewer@example.com'))->canAccess('doc'));
+    }
+
+    public function testALastingGrantKeepsTheConfiguredLifetime(): void
+    {
+        $this->files->method('get')->willReturn(new DriveFile(['id' => 'doc', 'parents' => [self::DRIVE_ID]]));
+        $this->permissions->method('listPermissions')->willReturn($this->permissionList([
+            ['viewer@example.com', null],
+        ]));
+
+        $lifetime = null;
+        $item     = $this->createMock(CacheItemInterface::class);
+        $item->method('isHit')->willReturn(false);
+        $item->method('set')->willReturnSelf();
+        $item->method('expiresAfter')->willReturnCallback(
+            function (mixed $time) use (&$lifetime, $item): CacheItemInterface {
+                $lifetime = $time;
+
+                return $item;
+            }
+        );
+        $pool = $this->createMock(CacheItemPoolInterface::class);
+        $pool->method('getItem')->willReturn($item);
+
+        $this->service(new FakeViewerContext('viewer@example.com'), pool: $pool, ttl: 300)->canAccess('doc');
+
+        self::assertSame(300, $lifetime);
+    }
+
+    public function testSettingAnExpiryOnAnInheritedGrantIsExplained(): void
+    {
+        // Same translation revoke() already does: the grant lives on a parent folder, and
+        // Google's reason for refusing is the thing to pass on, not the raw 403.
+        $this->permissions->method('update')->willThrowException(
+            new GoogleServiceException('Forbidden', 403, null, [['reason' => 'cannotModifyInheritedPermission']])
+        );
+
+        $this->expectException(InheritedPermissionException::class);
+
+        $this->service()->setExpiry('doc', 'perm-1', new \DateTimeImmutable('+3 days'));
+    }
+
     public function testAMalformedDriveIdIsAConfigurationProblem(): void
     {
         // It goes straight into every Drive query, so it is checked once, where it is set.
@@ -202,8 +297,12 @@ final class DriveDocumentServiceExpiryTest extends TestCase
         $this->service(driveId: 'not a drive id')->listFolder();
     }
 
-    private function service(?ViewerContextInterface $context = null, string $driveId = self::DRIVE_ID): DriveDocumentService
-    {
+    private function service(
+        ?ViewerContextInterface $context = null,
+        string $driveId = self::DRIVE_ID,
+        ?CacheItemPoolInterface $pool = null,
+        int $ttl = 300
+    ): DriveDocumentService {
         $drive              = $this->createMock(Drive::class);
         $drive->files       = $this->files;
         $drive->permissions = $this->permissions;
@@ -214,7 +313,28 @@ final class DriveDocumentServiceExpiryTest extends TestCase
             $driveId,
             ['application/vnd.google-apps.spreadsheet'],
             false,
-            $this->dispatcher
+            $this->dispatcher,
+            $pool,
+            $ttl
         );
+    }
+
+    /**
+     * @param list<array{0: string, 1: string|null}> $grants e-mail and RFC 3339 expiry, or null for a lasting one
+     */
+    private function permissionList(array $grants): PermissionList
+    {
+        $list = new PermissionList();
+        $list->setPermissions(array_map(
+            static fn (array $grant): GooglePermission => new GooglePermission(array_filter([
+                'emailAddress'   => $grant[0],
+                'type'           => DrivePermission::TYPE_USER,
+                'role'           => DrivePermission::ROLE_READER,
+                'expirationTime' => $grant[1],
+            ], static fn (mixed $v): bool => $v !== null)),
+            $grants
+        ));
+
+        return $list;
     }
 }
