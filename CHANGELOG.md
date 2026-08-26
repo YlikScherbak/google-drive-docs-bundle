@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The live smoke test is part of the repository.** `tools/smoke-test.php` works through the
+  bundle's surface against a real Shared Drive and erases everything it creates, including after a
+  fatal error. It was a private script until now, which made the one mechanism that catches what
+  mocks cannot something nobody else could run — and the two bugs fixed in 1.0.4 are what it found.
+  Credentials come from the environment (or a file named by `SMOKE_ENV_FILE`), what it creates can
+  be renamed with `SMOKE_PREFIX`, and `SMOKE_SECOND_EMAIL` enables the two sharing checks that need
+  a second Google identity
+- A manual **Live smoke test** CI workflow that runs it. Manual rather than automatic on purpose:
+  it writes to a real drive and spends Google quota, so it runs when asked. Reports what is missing
+  instead of failing obscurely when the secrets are absent
+
 ## [1.0.5] - 2026-08-26
 
 ### Documentation

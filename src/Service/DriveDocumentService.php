@@ -1299,7 +1299,9 @@ class DriveDocumentService
      * one back would show a document that does not carry the change just made. Read them
      * with appProperties() when you need them.
      *
-     * @param array<string, string|int|float|bool|null> $properties
+     * @param array<array-key, string|int|float|bool|null> $properties Keys are cast to string:
+     *        PHP turns a key like "2024" into the integer 2024 before this ever sees it, so a
+     *        stricter annotation would reject callers this method handles correctly
      */
     public function setAppProperties(string $fileId, array $properties): void
     {

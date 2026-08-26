@@ -4,6 +4,9 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  # The live smoke test is manual on purpose: it writes to a real Shared Drive and spends
+  # Google quota, so it runs when someone asks for it rather than on every push.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -84,3 +87,43 @@ jobs:
 
       - name: Run PHPStan
         run: vendor/bin/phpstan analyse --no-progress
+
+  live-smoke-test:
+    name: Live smoke test (real Shared Drive)
+    # Manual only, and it needs the four credentials as repository secrets. Without them the
+    # script refuses cleanly and the job reports why rather than failing on a stack trace.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Check the credentials are configured
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+        run: |
+          if [ -z "$GOOGLE_CLIENT_ID" ]; then
+            echo "::warning::No GOOGLE_CLIENT_ID secret is set, so there is no drive to talk to."
+            echo "Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_SHARED_DRIVE_ID and"
+            echo "GOOGLE_OAUTH_REFRESH_TOKEN as repository secrets to run this."
+            exit 1
+          fi
+
+      - name: Run it
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_SHARED_DRIVE_ID: ${{ secrets.GOOGLE_SHARED_DRIVE_ID }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          SMOKE_SECOND_EMAIL: ${{ secrets.SMOKE_SECOND_EMAIL }}
+          SMOKE_PREFIX: ci_smoke_${{ github.run_id }}_
+        run: php tools/smoke-test.php

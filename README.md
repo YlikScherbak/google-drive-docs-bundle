@@ -1209,6 +1209,42 @@ composer test      # PHPUnit
 composer phpstan   # static analysis
 ```
 
+### The live smoke test
+
+The suite above mocks Google's own classes, so it can only confirm that the bundle sends what the
+bundle thinks it should send. Some of Drive's rules cannot be learned that way, and two of them
+were learned the hard way: `permissions.update` is refused unless the body carries a role, and a
+JSON `null` never lifted an expiry — both shipped broken, both found by asking Drive.
+
+So `tools/smoke-test.php` asks Drive. It creates a folder, works through the bundle's surface
+against it — values, formatting, revisions, exports, a resumable upload over 5 MB, the changes
+feed, locking, trash, sharing — and erases everything it made in a `finally` block, including
+after a fatal error:
+
+```bash
+GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... GOOGLE_SHARED_DRIVE_ID=... \
+GOOGLE_OAUTH_REFRESH_TOKEN=... php tools/smoke-test.php
+```
+
+Or keep the four in a file and point `SMOKE_ENV_FILE` at it; the environment still wins. Two
+optional variables: `SMOKE_PREFIX` renames what it creates (default `smoke_test_`), and
+`SMOKE_SECOND_EMAIL` enables the two sharing checks that need a second Google identity, because a
+grant cannot be made to the account that already owns the drive — that address is granted access
+and revoked again, with no notification e-mail. Without it those two report as skipped.
+
+> **It writes to a real drive.** Point it at one you are willing to have written to. Every object
+> it creates carries the prefix and lives inside one folder, and the run ends by printing what it
+> created, what it erased, and — read this part — anything it could not erase.
+
+The same script runs in CI as the **Live smoke test** workflow, which is manual (`workflow_dispatch`)
+rather than automatic: it spends Google quota and writes to a real drive, so it runs when someone
+asks. It needs `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_SHARED_DRIVE_ID` and
+`GOOGLE_OAUTH_REFRESH_TOKEN` as repository secrets, plus `SMOKE_SECOND_EMAIL` for the sharing pair.
+
+One thing it cannot check is the iframe, which needs a browser. If embedding the editor matters to
+you, frame one document in the browsers you support — see the note under
+[Why this exists](#why-this-exists) for what has and has not been measured.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
