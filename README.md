@@ -877,6 +877,12 @@ shown in the Workspace editor may be more complete than the API's. Treat this as
 not an audit trail, and pin the versions that matter with `keepRevision()` while they are still
 listed. Only a limited number of revisions may be pinned per file.
 
+**Pinning works on uploaded files only.** On a Google format Drive accepts the call, ignores it and
+answers with the revision unchanged — no error, `keptForever` simply stays `false`. Read the value
+that comes back rather than the absence of an exception. So for a Sheet or a Doc, keeping a version
+that matters means exporting it, as below; pinning is not available. (Checked against Drive: an
+uploaded file answers `true`, a spreadsheet answers `false`.)
+
 Deleting a revision is final: there is no trash for one. Drive also refuses two kinds of it, with
 its own 403: the current version of any file, and any version of a Google format — Docs and Sheets
 keep their history for the editor alone. What can be deleted is the older versions of an uploaded
@@ -1021,6 +1027,14 @@ $this->drive->setExpiry($doc->id, $permissionId, null);   // lift it again
 Google's own restrictions are checked before the call, because a Drive 400 names neither the value
 nor the grant: the time must be **in the future** and **no more than a year ahead**, and an expiry
 can only sit on a user or group grant — which is all this bundle hands out anyway.
+
+**On a folder, only a reader's grant may expire.** Drive refuses a writer's or a commenter's with a
+403 whose reason is `cannotSetExpiration`, saying only "Expiration dates cannot be set on this
+item" — the item is fine, it is the pairing Drive objects to. A file's grant may expire in any of
+the three roles. So for temporary edit access to a whole folder, Drive gives you no expiry: grant
+`reader` with one, or grant `writer` on the individual files. (Measured against Drive rather than
+read off a page: file reader/commenter/writer all pass, folder reader passes, folder
+commenter/writer are refused.)
 
 The sharing cache respects it: an entry that holds an expiring grant lives no longer than that
 grant, whatever `permission_cache.ttl` says, and a grant Drive has not got round to removing yet

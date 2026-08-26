@@ -173,6 +173,11 @@ final class DriveDocumentServiceExpiryTest extends TestCase
 
     public function testAnExistingGrantCanBeGivenOrLoseAnExpiry(): void
     {
+        // setExpiry() reads the grant first: Drive wants the role back in the update body.
+        $this->permissions->method('get')->willReturn(
+            new GooglePermission(['id' => 'perm-1', 'role' => 'reader', 'type' => 'user'])
+        );
+
         $payload = null;
         $this->permissions->method('update')->willReturnCallback(
             function (string $file, string $perm, GooglePermission $body) use (&$payload): GooglePermission {
@@ -186,19 +191,85 @@ final class DriveDocumentServiceExpiryTest extends TestCase
         $this->service()->setExpiry('doc', 'perm-1', $expires);
         self::assertSame($expires->format(\DateTimeInterface::RFC3339), $payload->getExpirationTime());
 
-        // Null lifts the expiry, and the JSON that reaches Drive is what decides whether it
-        // does: permissions.update is a PATCH, so a field left out of the body means "keep the
-        // old value". The Google client drops PHP nulls when it serialises, which is why this
-        // looks at the wire format rather than at the getter.
+        // Null lifts the expiry, and nothing in the body does that: a JSON null there leaves the
+        // old time on the grant, which is what Drive was seen to do. It is the removeExpiration
+        // parameter that lifts one, so that is what this has to look at — see
+        // testLiftingAnExpiryAsksDriveToRemoveIt for the parameter itself.
         $this->service()->setExpiry('doc', 'perm-1', null);
 
         $wire = json_decode(json_encode($payload->toSimpleObject(), JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
-        self::assertArrayHasKey('expirationTime', $wire, 'the field has to travel, or the old expiry stays');
-        self::assertNull($wire['expirationTime']);
+        self::assertArrayNotHasKey('expirationTime', $wire, 'the body says nothing about the expiry either way');
+        self::assertSame('reader', $wire['role'] ?? null);
+    }
+
+    public function testTheBodyCarriesTheRoleDriveDemands(): void
+    {
+        // Drive answers a permissions.update whose body has no role with 400 "The permission
+        // role field is required" — seen against the live API, where every setExpiry() call
+        // failed. So the grant's own role has to travel with the expiry, unchanged.
+        $this->permissions->method('get')->willReturn(
+            new GooglePermission(['id' => 'perm-1', 'role' => 'writer', 'type' => 'user'])
+        );
+
+        $payload = null;
+        $this->permissions->method('update')->willReturnCallback(
+            function (string $file, string $perm, GooglePermission $body) use (&$payload): GooglePermission {
+                $payload = $body;
+
+                return new GooglePermission(['id' => 'perm-1', 'role' => 'writer', 'type' => 'user']);
+            }
+        );
+
+        $this->service()->setExpiry('doc', 'perm-1', new \DateTimeImmutable('+3 days'));
+
+        $wire = json_decode(json_encode($payload->toSimpleObject(), JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('writer', $wire['role'] ?? null, 'without the role Drive refuses the whole call');
+        self::assertArrayHasKey('expirationTime', $wire);
+
+        // And on the way back to a lasting grant, where the body is the role on its own.
+        $this->service()->setExpiry('doc', 'perm-1', null);
+
+        $wire = json_decode(json_encode($payload->toSimpleObject(), JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
+        self::assertSame('writer', $wire['role'] ?? null, 'without the role Drive refuses the whole call');
+        self::assertArrayNotHasKey('expirationTime', $wire);
+    }
+
+    public function testLiftingAnExpiryAsksDriveToRemoveIt(): void
+    {
+        // A JSON null in the body does not lift an expiry: Drive answers with the old time still
+        // on the grant, so the access went on ending at a date the caller had cleared. Checked
+        // against the live API, both ways round. permissions.update takes a removeExpiration
+        // parameter, and that is the thing that actually lifts one.
+        $this->permissions->method('get')->willReturn(
+            new GooglePermission(['id' => 'perm-1', 'role' => 'reader', 'type' => 'user'])
+        );
+
+        $params = null;
+        $this->permissions->method('update')->willReturnCallback(
+            function (string $file, string $perm, GooglePermission $body, array $optParams) use (&$params): GooglePermission {
+                $params = $optParams;
+
+                return new GooglePermission(['id' => 'perm-1', 'role' => 'reader', 'type' => 'user']);
+            }
+        );
+
+        $this->service()->setExpiry('doc', 'perm-1', null);
+
+        self::assertTrue($params['removeExpiration'] ?? false, 'without this the old expiry stays');
+
+        // And it must not travel when an expiry is being set, or Drive would drop the new one.
+        $this->service()->setExpiry('doc', 'perm-1', new \DateTimeImmutable('+3 days'));
+
+        self::assertArrayNotHasKey('removeExpiration', $params);
     }
 
     public function testSettingAnExpiryForgetsTheCachedSharing(): void
     {
+        // setExpiry() reads the grant first: Drive wants the role back in the update body.
+        $this->permissions->method('get')->willReturn(
+            new GooglePermission(['id' => 'perm-1', 'role' => 'reader', 'type' => 'user'])
+        );
+
         $this->permissions->method('update')->willReturn(new GooglePermission(['id' => 'perm-1']));
 
         $this->service()->setExpiry('doc', 'perm-1', new \DateTimeImmutable('+3 days'));
@@ -279,6 +350,12 @@ final class DriveDocumentServiceExpiryTest extends TestCase
     {
         // Same translation revoke() already does: the grant lives on a parent folder, and
         // Google's reason for refusing is the thing to pass on, not the raw 403.
+        //
+        // Reading an inherited grant is allowed; it is the update Drive refuses, which is why
+        // the get() here succeeds and the translation still has to happen.
+        $this->permissions->method('get')->willReturn(
+            new GooglePermission(['id' => 'perm-1', 'role' => 'reader', 'type' => 'user'])
+        );
         $this->permissions->method('update')->willThrowException(
             new GoogleServiceException('Forbidden', 403, null, [['reason' => 'cannotModifyInheritedPermission']])
         );

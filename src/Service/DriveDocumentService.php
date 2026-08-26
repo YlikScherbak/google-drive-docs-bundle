@@ -35,7 +35,6 @@ use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePermission;
 use Borsche\GoogleDriveDocsBundle\Model\DriveRevision;
-use Google\Model as GoogleModel;
 use Google\Service\Drive;
 use Google\Http\MediaFileUpload;
 use Google\Service\Drive\DriveFile;
@@ -820,6 +819,13 @@ class DriveDocumentService
      *
      * Google prunes revisions on its own and allows only a limited number of pinned ones per
      * file, so this is the way to make sure the version someone will want later survives.
+     *
+     * Only an uploaded file's revisions can be pinned. On a Google format — a Sheet, a Doc —
+     * Drive accepts the call, ignores it, and answers with the revision unchanged, so the
+     * returned `keptForever` is the thing to read rather than the absence of an exception.
+     * Verified against Drive, not inferred: a spreadsheet answers false where an uploaded
+     * file answers true. Those formats keep their history for the editor alone, which is the
+     * same reason deleteRevision() cannot touch them.
      */
     public function keepRevision(string $fileId, string $revisionId, bool $forever = true): DriveRevision
     {
@@ -1064,23 +1070,61 @@ class DriveDocumentService
      * carrying the grant as it now stands — a listener that keeps an audit trail sees one
      * event per change to a grant, not one per grant.
      *
+     * Costs one extra call: Drive demands the role in the body of a permissions.update and
+     * refuses the whole thing without it, so the grant is read first and its own role sent
+     * back unchanged. Reading it rather than taking it from the caller is deliberate — a role
+     * passed in from a stale DrivePermission would quietly change what someone may do, which
+     * is a far worse outcome than a round trip on an operation this rare.
+     *
+     * On a folder, only a reader's grant may expire. Drive refuses a writer's or a commenter's
+     * with a 403 whose reason is `cannotSetExpiration`, and it says only "Expiration dates
+     * cannot be set on this item" — the item is fine, it is the pairing it objects to. A file's
+     * grant may expire in any of the three roles. Measured against Drive, not inferred.
+     *
      * @throws InheritedPermissionException when the grant lives on a parent folder
      */
     public function setExpiry(string $fileId, string $permissionId, ?\DateTimeInterface $expiresAt): DrivePermission
     {
         $this->assertAccess($fileId);
 
+        $current = $this->drive->permissions->get($fileId, $permissionId, [
+            'supportsAllDrives' => true,
+            'fields'            => 'id,role',
+        ]);
+
+        $role = $current->getRole();
+
+        if ($role === null || $role === '') {
+            throw new UnexpectedDriveStateException(sprintf(
+                'Drive described permission "%s" on "%s" without a role, so its expiry cannot be '
+                . 'changed without guessing what the grant allows.',
+                $permissionId,
+                $fileId
+            ));
+        }
+
         $payload = new GooglePermission();
-        // Sent either way: permissions.update is a PATCH, so an omitted field leaves the old
-        // expiry in place. A PHP null is exactly what the Google client omits when it
-        // serialises; its NULL_VALUE placeholder is how a JSON null actually gets on the wire.
-        $payload->setExpirationTime($expiresAt === null ? GoogleModel::NULL_VALUE : $this->expiryFor($expiresAt));
+        // Drive rejects an update with no role — 400, "The permission role field is required" —
+        // however little of the grant is being changed. The role it already has goes back as it is.
+        $payload->setRole($role);
+
+        $params = [
+            'supportsAllDrives' => true,
+            'fields'            => 'id,emailAddress,role,type,displayName,expirationTime',
+        ];
+
+        if ($expiresAt === null) {
+            // A JSON null in the body does not lift an expiry — Drive answers with the old time
+            // still on the grant, so the access would go on ending at a date the caller cleared.
+            // This parameter is the only thing that lifts one, and it must not travel when an
+            // expiry is being set or Drive would drop it again.
+            $params['removeExpiration'] = true;
+        } else {
+            $payload->setExpirationTime($this->expiryFor($expiresAt));
+        }
 
         try {
-            $updated = $this->drive->permissions->update($fileId, $permissionId, $payload, [
-                'supportsAllDrives' => true,
-                'fields'            => 'id,emailAddress,role,type,displayName,expirationTime',
-            ]);
+            $updated = $this->drive->permissions->update($fileId, $permissionId, $payload, $params);
         } catch (GoogleServiceException $e) {
             if ($this->hasReason($e, ['cannotDeletePermission', 'cannotModifyInheritedPermission'])) {
                 throw new InheritedPermissionException(

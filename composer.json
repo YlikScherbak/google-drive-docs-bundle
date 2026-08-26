@@ -1,6 +1,6 @@
 {
     "name": "borsche/google-drive-docs-bundle",
-    "description": "Symfony bundle that turns a Google Shared Drive into a document workspace inside your app: browse folders, create/rename/move/delete Google Sheets & Docs, manage per-item sharing and filter visibility per user.",
+    "description": "Symfony bundle that turns a Google Shared Drive into a document workspace inside your app: folder browsing, per-item sharing with per-user visibility, Google Sheets values and formatting, revisions, locking, trash, export/import and a changes feed.",
     "keywords": [
         "symfony",
         "bundle",

@@ -6,6 +6,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`setExpiry()` never worked.** Drive refuses a `permissions.update` whose body carries no role —
+  400, "The permission role field is required" — however little of the grant is being changed, so
+  every call failed whatever was asked of it. The grant is now read first and its own role sent
+  back unchanged; reading it rather than taking it from the caller is deliberate, since a role
+  passed in from a stale `DrivePermission` would quietly change what someone may do
+- **Lifting an expiry left it in place.** `setExpiry($fileId, $permissionId, null)` sent a JSON
+  null in the body and Drive answered with the old time still on the grant, so access went on
+  ending at a date the caller had cleared. `permissions.update` lifts an expiry only when asked to
+  in the query, and that parameter is what travels now — never alongside a new expiry, which Drive
+  would then drop again
+
+  The 1.0.2 release claimed this fixed; it was not. The test behind that claim asserted the request
+  body, which was the right instinct after the release before it, but the body was never where the
+  answer lay. Both fixes were found by running the bundle against a real Shared Drive and are
+  verified there, not against a mock
+
+### Documentation
+- **On a folder, only a reader's grant may expire.** Drive refuses a writer's or a commenter's with
+  a 403 whose reason is `cannotSetExpiration`, saying only "Expiration dates cannot be set on this
+  item" — the item is fine, it is the pairing it objects to. A file's grant may expire in any of the
+  three roles. Measured across every combination rather than read off a page
+- **Pinning a revision works on uploaded files only.** On a Google format Drive accepts the call,
+  ignores it and answers with the revision unchanged — no error, `keptForever` simply stays false.
+  The README had recommended `keepRevision()` for exactly the case it does not cover; for a Sheet or
+  a Doc, keeping a version means exporting it
+- The package description named the feature set of 0.2 — no revisions, no trash, no export/import,
+  no locking, no changes feed, no table formatting. It names what 1.0 actually carries now
+
 ## [1.0.3] - 2026-08-26
 
 ### Changed
