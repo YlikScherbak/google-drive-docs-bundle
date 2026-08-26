@@ -9,6 +9,8 @@ use Borsche\GoogleDriveDocsBundle\Command\AuthorizeCommand;
 use Borsche\GoogleDriveDocsBundle\Command\CheckCommand;
 use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+use Borsche\GoogleDriveDocsBundle\Controller\DriveDocumentResolver;
+use Borsche\GoogleDriveDocsBundle\Security\DriveVoter;
 use Borsche\GoogleDriveDocsBundle\DependencyInjection\Compiler\ValidateCachePoolPass;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
@@ -91,6 +93,22 @@ class GoogleDriveDocsExtension extends Extension
         $spreadsheets->setPublic(true);
         $container->setDefinition(SpreadsheetService::class, $spreadsheets);
         $container->setAlias('google_drive_docs.spreadsheets', SpreadsheetService::class)->setPublic(true);
+
+        // Resolves a DriveDocument straight into a controller argument.
+        $resolver = new Definition(DriveDocumentResolver::class, [new Reference(DriveDocumentService::class)]);
+        $resolver->addTag('controller.argument_value_resolver', ['priority' => 100]);
+        $container->setDefinition(DriveDocumentResolver::class, $resolver);
+
+        // Only useful with the security component installed; registering it without would
+        // fail at compile time on an application that does not have it.
+        if (interface_exists(\Symfony\Component\Security\Core\Authorization\Voter\VoterInterface::class)) {
+            $voter = new Definition(DriveVoter::class, [
+                new Reference(DriveDocumentService::class),
+                new Reference(ViewerContextInterface::class),
+            ]);
+            $voter->addTag('security.voter');
+            $container->setDefinition(DriveVoter::class, $voter);
+        }
 
         // Console command (optional)
         if (class_exists(\Symfony\Component\Console\Command\Command::class)) {

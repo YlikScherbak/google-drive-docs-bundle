@@ -33,7 +33,9 @@ jobs:
 
       - name: Pin Symfony version
         run: |
-          composer require --no-update --dev symfony/console:${{ matrix.symfony }}
+          composer require --no-update --dev \
+            symfony/console:${{ matrix.symfony }} \
+            symfony/security-core:${{ matrix.symfony }}
           composer require --no-update \
             symfony/config:${{ matrix.symfony }} \
             symfony/dependency-injection:${{ matrix.symfony }} \

@@ -48,11 +48,13 @@ This bundle implements the second option: file management, folder navigation, sh
 - **OAuth-based auth** — works on organisations where service-account keys are disabled by policy
 - **Retries with exponential backoff** on rate limits and transient Google faults
 - **PSR-14 events** on every write, so auditing and notifications stay in your application
+- **`is_granted()` on drive items**, and documents resolved straight into controller arguments
+- **Several Shared Drives** from one service
 
 ## Requirements
 
 - PHP 8.1+
-- Symfony 6.x or 7.x
+- Symfony 6.4 or 7.x
 - A Google Workspace plan that includes **Shared Drives** (Business Standard or higher)
 
 ## Installation
@@ -260,6 +262,67 @@ validated, the event is still dispatched, the cached sharing is still invalidate
 where the decision to share is the application's own and already authorised by something else;
 never with a file id taken straight from a request. It is a separate method rather than a flag on
 `grant()` precisely so that every bypass can be found with one grep.
+
+## Deciding access with `is_granted()`
+
+The bundle reports what a viewer holds and leaves the decision alone — `roleOf()` says `reader`,
+and every service method still runs as the service user. `DriveVoter` is where that fact becomes a
+decision, in the application's own authorisation layer:
+
+```php
+use Borsche\GoogleDriveDocsBundle\Security\DriveVoter;
+
+if ($this->isGranted(DriveVoter::EDIT, $document)) {
+    // show the rename and delete buttons
+}
+
+#[IsGranted(DriveVoter::SHARE, subject: 'document')]
+public function share(DriveDocument $document): Response
+```
+
+Install `symfony/security-core` and the voter registers itself. Four attributes — `DRIVE_VIEW`,
+`DRIVE_EDIT`, `DRIVE_SHARE`, `DRIVE_DELETE` — taking a `DriveDocument` or a plain file id.
+
+`DRIVE_VIEW` asks whether the item is reachable at all; the other three ask for `writer` or
+stronger. They share one rule today and are separate anyway, so an application can pull them apart
+— a stricter rule for sharing, say — without touching the call sites that already say what they
+mean. A viewer whose `seesEverything()` is true is granted everything, because they have no role
+to read and the call would succeed regardless.
+
+**There is deliberately no `enforce_roles` option inside the service.** Which role an operation
+should require is genuinely arguable: Google itself wants `organizer` for some sharing changes and
+`writer` for others, depending on how the drive is set up. A matrix baked into a library is a wrong
+answer nobody reviews; a voter is one you can read, override and test. Replace `DriveVoter` with
+your own and nothing else changes.
+
+## Documents as controller arguments
+
+```php
+#[Route('/documents/{fileId}')]
+public function show(DriveDocument $document): Response
+{
+    return $this->render('document.html.twig', ['document' => $document]);
+}
+```
+
+The id comes from the route parameter sharing the argument's name, or from `fileId` or `id`. This
+costs one Drive call — the same one the controller would have made, moved earlier — and it applies
+the access check, so an id the viewer may not reach raises `AccessDeniedException` before the
+controller body runs. That is the reason to resolve rather than take the id from the request.
+
+## Several Shared Drives
+
+One drive is the common case and stays the configuration's business. A second workspace — a
+department, a client — is `forDrive()`:
+
+```php
+$other = $this->drive->forDrive($clientDriveId);
+$other->listFolder();
+```
+
+Everything else carries over unchanged: the viewer context, the MIME types, the cache and its
+lifetime, the upload limits. The instance you called it on is untouched, and asking for the drive
+it already points at hands back the same object.
 
 ## Per-user visibility
 
@@ -908,9 +971,11 @@ Exporting is a read operation: it dispatches no event.
   }
   ```
 
-  The bundle deliberately does not do this inside `listFolder()`: it would cost an extra
-  Google round trip on the hottest path to close a case you only reach through a stale link,
-  and the viewer would still only see items they already have access to.
+  The bundle deliberately does not do this inside `listFolder()`, and 1.0 settles that rather
+  than leaving it open: the check would cost another Drive call on the hottest listing path to
+  cover a case only a stale link or bookmark reaches, and where the viewer sees nothing they
+  could not already see. It is stated in the `listFolder()` docblock too, so the contract is
+  visible from the IDE and not only from here.
 - **Restoring returns an item to its original parent.** If that folder is itself in the trash,
   restore it too, otherwise the item stays out of reach.
 - **`deleteForever()` needs the Manager role.** A "Content manager" may trash but not purge;

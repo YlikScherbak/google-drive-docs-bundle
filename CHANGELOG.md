@@ -6,6 +6,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The public API is settled. From here on, minor releases add and only a major one removes — see
+[UPGRADE.md](UPGRADE.md), which now covers every step from 0.1.0 and states the promise in full.
+
+### Removed
+- `DriveDocumentService::delete()`, deprecated since 0.3.0. It erased an item for good, which its
+  name never said: use `deleteForever()` for that behaviour, or `trash()` for what a delete button
+  in a UI probably means
+- `DriveDocumentService::MAX_UPLOAD_BYTES`, deprecated since 0.7.0 when resumable uploads removed
+  the ceiling it described. `MULTIPART_LIMIT` is where the two upload paths part; `upload.max_bytes`
+  is for a limit of your own
+- `symfony/deprecation-contracts` is no longer required — it existed for that one deprecation
+
+### Changed
+- Symfony `^6.0 || ^7.0` narrowed to `^6.4 || ^7.0`. CI only ever verified 6.4 and 7, and for a
+  release carrying a compatibility promise, claiming support nothing checks is worse than
+  narrowing it. No code changed
+
+### Added
+- `DriveVoter` decides access through `is_granted()`: `DRIVE_VIEW`, `DRIVE_EDIT`, `DRIVE_SHARE`,
+  `DRIVE_DELETE`, taking a `DriveDocument` or a file id. Registers itself when
+  `symfony/security-core` is installed. This is where "the bundle reports, it does not enforce"
+  becomes a decision that can be read, overridden and tested
+- `DriveDocumentResolver` turns a route parameter into a `DriveDocument` controller argument,
+  applying the access check before the controller body runs
+- `forDrive($driveId)` returns the same service pointed at another Shared Drive, carrying every
+  other setting over. One drive stays the configuration's business
+- `UPGRADE.md`
+
+### Notes
+- **No `enforce_roles` option, deliberately, and this is the release that settles it.** Which role
+  an operation should require is arguable — Google wants `organizer` for some sharing changes and
+  `writer` for others depending on the drive's setup — so a matrix inside the service would be a
+  wrong answer nobody reviews. `DriveVoter` is that matrix somewhere replaceable
+- **`listFolder()` on a folder that is in the trash still lists its contents**, and 1.0 settles
+  that too. Google flags the folder alone, so checking would put another Drive call on the hottest
+  listing path to cover a case only a stale link reaches, where the viewer sees nothing new. Now
+  stated in the method's own docblock, not only in the README
+- A profiler panel was on the plan and dropped: Google's client exposes resources as public
+  properties rather than methods, so counting calls would mean decorating every resource class.
+  A half-useful panel is worse than none
+
 ## [0.9.0] - 2026-08-26
 
 ### Added

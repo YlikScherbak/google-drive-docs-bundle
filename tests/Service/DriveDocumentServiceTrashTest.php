@@ -260,15 +260,19 @@ final class DriveDocumentServiceTrashTest extends TestCase
         $this->service()->deleteForever('doc-1');
     }
 
-    /**
-     * @group legacy
-     */
-    public function testDeprecatedDeleteStillRemovesTheFileForGood(): void
+    public function testDeleteForeverIsTheOnlyWayToEraseNow(): void
     {
+        // delete() carried this behaviour under a name that never said so, and was removed
+        // in 1.0 after being deprecated since 0.3.0.
+        self::assertFalse(
+            method_exists(DriveDocumentService::class, 'delete'),
+            'delete() was removed in 1.0; deleteForever() and trash() replace it'
+        );
+
         $this->files->expects(self::once())->method('delete');
         $this->files->expects(self::never())->method('update');
 
-        $this->service()->delete('doc-1');
+        $this->service()->deleteForever('doc-1');
 
         self::assertSame('doc-1', $this->dispatcher->single(DocumentDeletedEvent::class)->fileId);
     }

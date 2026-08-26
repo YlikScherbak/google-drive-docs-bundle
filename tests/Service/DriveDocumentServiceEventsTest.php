@@ -87,7 +87,7 @@ final class DriveDocumentServiceEventsTest extends TestCase
 
     public function testDeletingDispatchesAnEvent(): void
     {
-        $this->service()->delete('doc-1');
+        $this->service()->deleteForever('doc-1');
 
         self::assertSame('doc-1', $this->dispatcher->single(DocumentDeletedEvent::class)->fileId);
     }

@@ -119,13 +119,6 @@ class DriveDocumentService
      */
     public const MULTIPART_LIMIT = 5 * 1024 * 1024;
 
-    /**
-     * @deprecated since 0.7.0, the multipart ceiling is no longer the largest upload —
-     *             use MULTIPART_LIMIT for the threshold, or the upload.max_bytes option
-     *             for a limit of your own.
-     */
-    public const MAX_UPLOAD_BYTES = self::MULTIPART_LIMIT;
-
     /** Resumable chunks must be a multiple of this. */
     public const CHUNK_GRANULARITY = 256 * 1024;
 
@@ -229,8 +222,55 @@ class DriveDocumentService
     }
 
     /**
+     * The same service pointed at another Shared Drive.
+     *
+     * One configured drive is the common case, so it stays the constructor's business; a
+     * second workspace — a department, a client — is this. Everything else is carried over
+     * unchanged: the viewer context, the MIME types, the cache and its lifetime, the upload
+     * limits. The instance you called it on is untouched.
+     *
+     * Built by hand rather than cloned, because readonly properties cannot be reassigned;
+     * DriveDocumentServiceMultiDriveTest walks the constructor to notice an argument that
+     * stops being carried over.
+     */
+    public function forDrive(string $driveId): self
+    {
+        if ($driveId === $this->sharedDriveId) {
+            return $this;
+        }
+
+        if ($driveId === '') {
+            throw new NotConfiguredException('A drive id is required; "" is not one.');
+        }
+
+        if (preg_match('/^[A-Za-z0-9_-]+$/', $driveId) !== 1) {
+            throw new NotConfiguredException(sprintf('"%s" is not a Google Drive id.', $driveId));
+        }
+
+        return new self(
+            $this->drive,
+            $this->viewerContext,
+            $driveId,
+            $this->documentMimeTypes,
+            $this->notifyOnShare,
+            $this->dispatcher,
+            $this->permissionCache,
+            $this->permissionCacheTtl,
+            $this->maxUploadBytes,
+            $this->chunkBytes,
+        );
+    }
+
+    /**
      * Folder contents (sub-folders first, then documents), filtered for the current viewer.
      * Pass null to list the root of the Shared Drive.
+     *
+     * Trashing a folder flags the folder alone — Google leaves the contents' own state
+     * untouched — so this still lists what is inside a folder that is in the trash. Settled
+     * deliberately as of 1.0: checking would put another Drive call on the hottest path here
+     * to cover a case only a stale link or bookmark reaches, and where the viewer sees
+     * nothing they could not already see. Guard it where the data is already at hand —
+     * a page that renders breadcrumbs has fetched the folder, and get() reports `trashed`.
      *
      * @return DriveDocument[]
      */
@@ -310,7 +350,7 @@ class DriveDocumentService
      * @param bool        $convert    Set false to keep the uploaded file exactly as it is
      * @param string|null $mimeType   Overrides the type guessed from the extension
      *
-     * @throws UploadTooLargeException   above MAX_UPLOAD_BYTES
+     * @throws UploadTooLargeException   above the upload.max_bytes you configured
      * @throws \InvalidArgumentException when the path is not a readable file
      */
     public function import(
@@ -614,22 +654,6 @@ class DriveDocumentService
         $this->forgetGrants($fileId);
 
         $this->dispatch(new DocumentDeletedEvent($fileId));
-    }
-
-    /**
-     * @deprecated since 0.3.0, use deleteForever() to keep erasing items for good,
-     *             or trash() to move them to the trash instead.
-     */
-    public function delete(string $fileId): void
-    {
-        trigger_deprecation(
-            'borsche/google-drive-docs-bundle',
-            '0.3.0',
-            'Calling "%s()" is deprecated, use "deleteForever()" for the same behaviour or "trash()" to move the item to the trash instead.',
-            __METHOD__
-        );
-
-        $this->deleteForever($fileId);
     }
 
     /**
