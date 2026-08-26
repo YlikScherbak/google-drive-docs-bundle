@@ -36,6 +36,7 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Format what you generated** — headers, borders, number formats, conditional rules,
   dropdowns, filters, protected formula columns
 - **Trash and restore** items, browse the trash, or erase for good — accidental deletions stay recoverable
+- **Version history** — list what Drive kept, pin what matters, fetch old content back
 - **Embed the native Google editor** via the `webViewLink` of each document
 - **Manage sharing**: list, grant and revoke access per file or folder (`reader` / `commenter` / `writer`), for individual users or **Google groups**
 - **Per-user visibility**: users only see the items shared with them; administrators see everything
@@ -536,6 +537,8 @@ invalidation live in your application instead of in the bundle:
 | `SheetTabRenamedEvent` | a tab is renamed | `from`, `to`, `sheetId` |
 | `SheetTabDeletedEvent` | a tab and its contents are removed | `title`, `sheetId` |
 | `DocumentPropertiesChangedEvent` | the application's metadata on an item changes | `properties` |
+| `RevisionKeptEvent` | a version is pinned or released | `revisionId`, `kept` |
+| `RevisionDeletedEvent` | a version is removed from the history | `revisionId` |
 | `DocumentRenamedEvent` | an item is renamed | `document` |
 | `DocumentMovedEvent` | an item is moved | `document`, `fromParentId`, `toParentId` |
 | `DocumentTrashedEvent` | an item is moved to the trash | `document` |
@@ -722,6 +725,54 @@ $sheet->webViewLink;  // already editable in the embedded editor
   while a raw parameter would happily name `.env`. Build the path yourself.
 - **A stored-as-is file stays invisible to `listFolder()`** unless its MIME type is listed in
   `document_mime_types` — add `application/pdf` there if you import PDFs and want them shown.
+
+## Version history
+
+The trash protects against losing a file. It does nothing about a spreadsheet whose contents
+someone overwrote — which, for a document full of formulas, is the more likely accident. Drive
+keeps versions, and this reads them:
+
+```php
+foreach ($this->drive->listRevisions($fileId) as $revision) {
+    $revision->id;            // 'r7'
+    $revision->modifiedTime;  // when this version was saved
+    $revision->modifiedBy;    // who saved it
+    $revision->keptForever;   // pinned against pruning?
+}
+
+$this->drive->keepRevision($fileId, 'r7');           // pin it
+$this->drive->keepRevision($fileId, 'r7', false);    // release it again
+$this->drive->deleteRevision($fileId, 'r3');
+```
+
+Two limits shape how this can be used, and both come from Drive rather than from here.
+
+**There is no rollback.** Drive API v3 lists, reads, pins and deletes revisions — it cannot make
+an old one current again. Only the Google editor restores a version in place. So recovering old
+content means fetching it and deciding where it goes:
+
+```php
+$old = $this->drive->exportRevision($fileId, 'r7', DriveExport::XLSX);
+
+// Either keep it beside the live document…
+file_put_contents($temp = tempnam(sys_get_temp_dir(), 'rev'), $old->contents());
+$recovered = $this->drive->import($temp, 'Q3 report (as of 12 August)', $folderId);
+
+// …or read the values and put them back into the live one.
+$this->sheets->write($fileId, 'Q3!A1', $rows);
+```
+
+For a Google format there are no stored bytes, so a revision offers export links instead and the
+MIME type picks between them — `DriveExport::XLSX` round-trips formulas, `CSV` does not. An
+uploaded file has bytes, and `exportRevision()` hands them back as they are.
+
+**The list can be incomplete.** Google's own documentation says older revisions are omitted for
+files with a long history — frequently edited Sheets and Docs especially — and that the history
+shown in the Workspace editor may be more complete than the API's. Treat this as a recovery aid,
+not an audit trail, and pin the versions that matter with `keepRevision()` while they are still
+listed. Only a limited number of revisions may be pinned per file.
+
+Deleting a revision is final: there is no trash for one.
 
 ## Linking documents to your own records
 

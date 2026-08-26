@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Version history: `listRevisions()`, `revision()`, `keepRevision()`, `deleteRevision()` and
+  `exportRevision()`, with a `DriveRevision` model carrying when a version was saved, who saved
+  it, its size, whether it is pinned and which formats it can be fetched as. The trash protects
+  against losing a file; this is what protects against a spreadsheet someone overwrote
+- `RevisionKeptEvent` and `RevisionDeletedEvent`
+
+### Notes
+- **There is no rollback, and none is pretended.** Drive API v3 lists, reads, pins and deletes
+  revisions; only the Google editor can make an old version current again. `exportRevision()`
+  fetches the old content so the application can decide where it goes — `import()` it beside the
+  live document, or read the values back with `SpreadsheetService`. The README carries both
+  recipes
+- **The revision list can be incomplete.** Google documents that older revisions are omitted for
+  files with a long history, frequently edited Sheets and Docs especially, and that the Workspace
+  editor may show more than the API. Said plainly in the README and on the model, because it
+  would otherwise look like an audit trail
+- A Google format stores no bytes of its own, so its revisions carry export links and the MIME
+  type chooses between them; an uploaded file's revision is downloaded directly. `exportRevision()`
+  settles which of the two applies, and refuses a format the revision does not offer, before
+  spending a request on the document's name
+
 ## [0.7.1] - 2026-08-26
 
 ### Fixed

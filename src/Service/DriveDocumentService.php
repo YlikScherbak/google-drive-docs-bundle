@@ -16,6 +16,8 @@ use Borsche\GoogleDriveDocsBundle\Event\DocumentPropertiesChangedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentRenamedEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentRestoredEvent;
 use Borsche\GoogleDriveDocsBundle\Event\DocumentTrashedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\RevisionDeletedEvent;
+use Borsche\GoogleDriveDocsBundle\Event\RevisionKeptEvent;
 use Borsche\GoogleDriveDocsBundle\Event\FolderCreatedEvent;
 use Borsche\GoogleDriveDocsBundle\Exception\AccessDeniedException;
 use Borsche\GoogleDriveDocsBundle\Exception\InheritedPermissionException;
@@ -29,11 +31,13 @@ use Borsche\GoogleDriveDocsBundle\Model\DriveDocument;
 use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePermission;
+use Borsche\GoogleDriveDocsBundle\Model\DriveRevision;
 use Google\Service\Drive;
 use Google\Http\MediaFileUpload;
 use Google\Service\Drive\DriveFile;
 use Google\Service\Drive\DriveFileCapabilities;
 use Google\Service\Drive\Permission as GooglePermission;
+use Google\Service\Drive\Revision as GoogleRevision;
 use Google\Service\Exception as GoogleServiceException;
 use Psr\Cache\CacheItemPoolInterface;
 use Psr\Http\Message\RequestInterface;
@@ -127,6 +131,9 @@ class DriveDocumentService
     public const MAX_CHUNK_BYTES = 64 * 1024 * 1024;
 
     private const FALLBACK_MIME = 'application/octet-stream';
+
+    private const REVISION_FIELDS = 'id,modifiedTime,keepForever,size,mimeType,'
+        . 'originalFilename,exportLinks,lastModifyingUser(displayName,emailAddress)';
 
     /**
      * File extension to the MIME type of the uploaded bytes.
@@ -617,6 +624,143 @@ class DriveDocumentService
         );
 
         $this->deleteForever($fileId);
+    }
+
+    /**
+     * The versions Drive kept of an item, oldest first.
+     *
+     * **The list can be incomplete.** Google's own documentation says older revisions are
+     * omitted for files with a long history — frequently edited Sheets and Docs especially —
+     * and that the Workspace editor may show more than the API does. Pin what matters with
+     * keepRevision(); this is a recovery aid, not an audit trail.
+     *
+     * @return DriveRevision[]
+     */
+    public function listRevisions(string $fileId): array
+    {
+        $this->assertAccess($fileId);
+
+        $revisions = [];
+        $pageToken = null;
+        $pages     = 0;
+
+        do {
+            $this->assertPageBudget(++$pages, 'revisions.list');
+
+            $params = [
+                'fields'   => 'nextPageToken, revisions(' . self::REVISION_FIELDS . ')',
+                'pageSize' => 1000,
+            ];
+
+            if ($pageToken !== null) {
+                $params['pageToken'] = $pageToken;
+            }
+
+            $response = $this->drive->revisions->listRevisions($fileId, $params);
+
+            foreach ($response->getRevisions() as $revision) {
+                $revisions[] = $this->mapRevision($revision);
+            }
+
+            $next      = $response->getNextPageToken();
+            $pageToken = $next !== null && $next !== '' ? $next : null;
+        } while ($pageToken !== null);
+
+        return $revisions;
+    }
+
+    public function revision(string $fileId, string $revisionId): DriveRevision
+    {
+        $this->assertAccess($fileId);
+
+        return $this->mapRevision($this->drive->revisions->get($fileId, $revisionId, [
+            'fields' => self::REVISION_FIELDS,
+        ]));
+    }
+
+    /**
+     * Pin a version so Drive keeps it however the history is pruned, or release it again.
+     *
+     * Google prunes revisions on its own and allows only a limited number of pinned ones per
+     * file, so this is the way to make sure the version someone will want later survives.
+     */
+    public function keepRevision(string $fileId, string $revisionId, bool $forever = true): DriveRevision
+    {
+        $this->assertAccess($fileId);
+
+        $payload = new GoogleRevision();
+        $payload->setKeepForever($forever);
+
+        $revision = $this->mapRevision($this->drive->revisions->update($fileId, $revisionId, $payload, [
+            'fields' => self::REVISION_FIELDS,
+        ]));
+
+        $this->dispatch(new RevisionKeptEvent($fileId, $revisionId, $forever));
+
+        return $revision;
+    }
+
+    /**
+     * Remove a version from an item's history. There is no trash for a revision: what that
+     * version held is gone.
+     */
+    public function deleteRevision(string $fileId, string $revisionId): void
+    {
+        $this->assertAccess($fileId);
+
+        $this->drive->revisions->delete($fileId, $revisionId);
+
+        $this->dispatch(new RevisionDeletedEvent($fileId, $revisionId));
+    }
+
+    /**
+     * The content of an old version, as a download.
+     *
+     * There is no way to make an old version current again — Drive API v3 lists, reads, pins
+     * and deletes revisions, and only the Google editor restores one in place. So recovering
+     * old content means fetching it and deciding what to do with it: import() it as a new
+     * document, or read the values back into the live one with SpreadsheetService.
+     *
+     * A Google format has no stored bytes, so its revisions carry export links instead and
+     * $mimeType picks between them. An uploaded file has bytes, and they come back as they
+     * are whatever is asked for.
+     */
+    public function exportRevision(string $fileId, string $revisionId, ?string $mimeType = null): DriveExport
+    {
+        $revision = $this->revision($fileId, $revisionId);
+        $target   = null;
+
+        // Settled before the document is fetched for its name: a format this revision does
+        // not offer is a caller's mistake, and it should not cost a round trip to say so.
+        if ($revision->exportLinks !== []) {
+            $target = $mimeType ?? array_key_first($revision->exportLinks);
+
+            if (!isset($revision->exportLinks[$target])) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Revision "%s" is not offered as %s. Available: %s.',
+                    $revisionId,
+                    $target,
+                    implode(', ', array_keys($revision->exportLinks))
+                ));
+            }
+        }
+
+        $name = $this->get($fileId)->name ?? $fileId;
+
+        if ($target !== null) {
+            return new DriveExport(
+                $this->exportFilename($name, $target),
+                $target,
+                $this->fetchAuthorized($revision->exportLinks[$target])
+            );
+        }
+
+        // An uploaded file keeps its bytes, so the revision itself can be downloaded.
+        return new DriveExport(
+            $name,
+            $revision->mimeType ?? self::FALLBACK_MIME,
+            $this->bodyOf($this->drive->revisions->get($fileId, $revisionId, ['alt' => 'media']))
+        );
     }
 
     /**
@@ -1395,6 +1539,40 @@ class DriveDocumentService
             (bool) $capabilities->getCanAddChildren(),
             (bool) $capabilities->getCanMoveItemWithinDrive(),
         );
+    }
+
+    private function mapRevision(GoogleRevision $revision): DriveRevision
+    {
+        $user = $revision->getLastModifyingUser();
+        $size = $revision->getSize();
+
+        /** @var array<string, string>|null $links */
+        $links = $revision->getExportLinks();
+
+        return new DriveRevision(
+            (string) $revision->getId(),
+            $revision->getModifiedTime(),
+            $user !== null ? ($user->getDisplayName() ?: $user->getEmailAddress()) : null,
+            // Drive sends int64 as a string, and omits it for its own formats.
+            $size !== null ? (int) $size : null,
+            (bool) $revision->getKeepForever(),
+            $revision->getMimeType(),
+            $revision->getOriginalFilename(),
+            $links ?? [],
+        );
+    }
+
+    /**
+     * Fetches a Drive URL with the service user's credentials.
+     *
+     * Export links are ordinary authenticated URLs rather than API calls, so they go through
+     * the client's own authorised HTTP client instead of a service method.
+     */
+    private function fetchAuthorized(string $url): StreamInterface
+    {
+        $response = $this->drive->getClient()->authorize()->request('GET', $url, ['stream' => true]);
+
+        return $response->getBody();
     }
 
     private function mapPermission(
