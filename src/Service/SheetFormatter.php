@@ -30,6 +30,7 @@ use Google\Service\Sheets\UpdateBordersRequest;
 use Google\Service\Sheets\CellData;
 use Google\Service\Sheets\CellFormat;
 use Google\Service\Sheets\Color;
+use Google\Service\Sheets\ColorStyle;
 use Google\Service\Sheets\DimensionProperties;
 use Google\Service\Sheets\DimensionRange;
 use Google\Service\Sheets\GridProperties;
@@ -62,6 +63,8 @@ use Psr\EventDispatcher\EventDispatcherInterface;
  *
  * Ranges are A1 notation, as everywhere else in the bundle; the numeric sheet ids Google's
  * formatting calls actually want are resolved at apply() with a single lookup.
+ *
+ * As in DriveDocumentService, `Google\Service\Exception` propagates rather than being wrapped.
  */
 class SheetFormatter
 {
@@ -138,8 +141,8 @@ class SheetFormatter
         }
 
         if ($color !== null) {
-            $text->setForegroundColor(self::colour($color));
-            $fields[] = 'userEnteredFormat.textFormat.foregroundColor';
+            $text->setForegroundColorStyle(self::colour($color));
+            $fields[] = 'userEnteredFormat.textFormat.foregroundColorStyle';
         }
 
         if ($fields !== []) {
@@ -147,8 +150,8 @@ class SheetFormatter
         }
 
         if ($background !== null) {
-            $format->setBackgroundColor(self::colour($background));
-            $fields[] = 'userEnteredFormat.backgroundColor';
+            $format->setBackgroundColorStyle(self::colour($background));
+            $fields[] = 'userEnteredFormat.backgroundColorStyle';
         }
 
         if ($horizontalAlign !== null) {
@@ -317,7 +320,7 @@ class SheetFormatter
             $border->setStyle($style);
 
             if ($color !== null) {
-                $border->setColor(self::colour($color));
+                $border->setColorStyle(self::colour($color));
             }
 
             return $border;
@@ -380,13 +383,13 @@ class SheetFormatter
         }
 
         if ($color !== null) {
-            $text->setForegroundColor(self::colour($color));
+            $text->setForegroundColorStyle(self::colour($color));
             $format->setTextFormat($text);
             $styled = true;
         }
 
         if ($background !== null) {
-            $format->setBackgroundColor(self::colour($background));
+            $format->setBackgroundColorStyle(self::colour($background));
             $styled = true;
         }
 
@@ -528,11 +531,11 @@ class SheetFormatter
     public function bandedRows(string $range, string $first = '#FFFFFF', string $second = '#F3F3F3', ?string $header = null): self
     {
         $properties = new BandingProperties();
-        $properties->setFirstBandColor(self::colour($first));
-        $properties->setSecondBandColor(self::colour($second));
+        $properties->setFirstBandColorStyle(self::colour($first));
+        $properties->setSecondBandColorStyle(self::colour($second));
 
         if ($header !== null) {
-            $properties->setHeaderColor(self::colour($header));
+            $properties->setHeaderColorStyle(self::colour($header));
         }
 
         return $this->withRange($range, static function (int $sheetId, GridRange $grid) use ($properties): Request {
@@ -564,7 +567,7 @@ class SheetFormatter
     /** The colour of the tab itself, for telling generated sheets from hand-made ones. */
     public function tabColor(string $tab, string $color): self
     {
-        return $this->tabProperty($tab, 'tabColor', self::colour($color));
+        return $this->tabProperty($tab, 'tabColorStyle', self::colour($color));
     }
 
     /** How many changes are waiting to be sent. */
@@ -601,6 +604,7 @@ class SheetFormatter
         foreach ($this->pending as $change) {
             $tab = $change['tab'] ?? $first;
 
+            // $tab is int for a tab titled "2024" — PHP coerced the key when the map was built.
             if ($tab === null || !array_key_exists($tab, $sheetIds)) {
                 throw new \InvalidArgumentException(sprintf(
                     'This spreadsheet has no tab called "%s". Known tabs: %s.',
@@ -696,30 +700,11 @@ class SheetFormatter
     }
 
     /**
-     * Tab title to numeric sheet id, in the order the spreadsheet holds them, so the first
-     * key is the tab a range without a name refers to.
-     *
      * @return array<string, int>
      */
     private function sheetIds(): array
     {
-        $spreadsheet = $this->sheets->spreadsheets->get($this->fileId, [
-            'fields' => 'sheets.properties(title,sheetId)',
-        ]);
-
-        $ids = [];
-
-        foreach ($spreadsheet->getSheets() ?? [] as $sheet) {
-            $properties = $sheet->getProperties();
-
-            if ($properties === null || $properties->getTitle() === null || $properties->getSheetId() === null) {
-                continue;
-            }
-
-            $ids[$properties->getTitle()] = $properties->getSheetId();
-        }
-
-        return $ids;
+        return SheetTabIndex::of($this->sheets, $this->fileId);
     }
 
     /**
@@ -738,7 +723,7 @@ class SheetFormatter
                 if ($field === 'hidden') {
                     $properties->setHidden($value);
                 } else {
-                    $properties->setTabColor($value);
+                    $properties->setTabColorStyle($value);
                 }
 
                 $update = new UpdateSheetPropertiesRequest();
@@ -822,8 +807,14 @@ class SheetFormatter
         return $condition;
     }
 
-    /** `#RRGGBB` or `#RGB` to the 0..1 floats Google wants. */
-    private static function colour(string $hex): Color
+    /**
+     * `#RRGGBB` or `#RGB` to the shape Google wants: a ColorStyle wrapping the 0..1 floats.
+     *
+     * Every plain `color` field on a Sheets request is deprecated in favour of its
+     * `colorStyle` twin, which also admits a theme colour. The field masks name the twin
+     * accordingly — a mask and the field it sets have to agree.
+     */
+    private static function colour(string $hex): ColorStyle
     {
         if (preg_match('/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/', $hex, $m) !== 1) {
             throw new \InvalidArgumentException(sprintf(
@@ -843,6 +834,6 @@ class SheetFormatter
             [substr($digits, 0, 2), substr($digits, 2, 2), substr($digits, 4, 2)]
         );
 
-        return new Color(['red' => $r, 'green' => $g, 'blue' => $b]);
+        return new ColorStyle(['rgbColor' => new Color(['red' => $r, 'green' => $g, 'blue' => $b])]);
     }
 }

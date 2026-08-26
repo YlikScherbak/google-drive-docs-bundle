@@ -57,6 +57,12 @@ use Psr\EventDispatcher\EventDispatcherInterface;
  * Files stay in Google (formulas, formatting and charts keep working); the
  * application only browses, creates and shares them. Sharing lives in Google as
  * well — the bundle never keeps its own copy of the access rules.
+ *
+ * Google's own failures are not wrapped: `Google\Service\Exception` propagates out of every
+ * method here, carrying Drive's status and message, and is meant to be handled once where the
+ * application decides what an outage looks like. Only the cases the bundle can say something
+ * more useful about — an inherited grant, a folder asked to be copied — get an exception of
+ * their own; those are the ones carrying a `@throws`.
  */
 class DriveDocumentService
 {
@@ -1257,6 +1263,8 @@ class DriveDocumentService
 
         $payload = [];
 
+        // The casts are not redundant however the array is annotated: PHP turns a key like
+        // "2024" into the integer 2024 on the way in, and appProperties keys come from callers.
         foreach ($properties as $key => $value) {
             if (trim((string) $key) === '') {
                 throw new \InvalidArgumentException('A property key cannot be empty.');

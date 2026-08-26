@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Table formatting now sends every colour as a `colorStyle`, the field Google asks for since the
+  plain `color` fields were deprecated, and the field masks name the twin accordingly — a mask and
+  the field it sets have to agree. Affects `style()`, `borders()`, `conditionalFormat()`,
+  `bandedRows()` and `tabColor()`. The bundle's own API is unchanged: colours are still `#RRGGBB`
+  or `#RGB` strings and the result on the sheet is the same
+
+### Internal
+- The tab-title-to-sheet-id lookup, which `SpreadsheetService` and `SheetFormatter` each carried a
+  copy of, moved to `SheetTabIndex`. The two copies had already needed the same null guard applied
+  separately once, which is the kind of fix that looks done and is not
+- Where a `(string)` cast on an array key looks redundant it is now explained: PHP turns a key like
+  `"2024"` into the integer `2024`, so a numerically titled tab or app-property key arrives as an
+  int however the array is annotated
+- The class docblocks state what the README already did — that `Google\Service\Exception` is
+  passed through rather than wrapped, and only the cases the bundle can explain better get an
+  exception of their own
+
 ## [1.0.2] - 2026-08-26
 
 ### Fixed

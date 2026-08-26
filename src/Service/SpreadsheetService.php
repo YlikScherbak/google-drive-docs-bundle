@@ -31,6 +31,8 @@ use Psr\EventDispatcher\EventDispatcherInterface;
  *
  * Access is not decided here. Every call asks DriveDocumentService, so a spreadsheet's
  * contents are exactly as reachable as the spreadsheet itself — reads included.
+ *
+ * As in DriveDocumentService, `Google\Service\Exception` propagates rather than being wrapped.
  */
 class SpreadsheetService
 {
@@ -407,29 +409,11 @@ class SpreadsheetService
     }
 
     /**
-     * Tab title to numeric sheet id.
-     *
      * @return array<string, int>
      */
     private function tabIds(string $fileId): array
     {
-        $spreadsheet = $this->sheets->spreadsheets->get($fileId, [
-            'fields' => 'sheets.properties(title,sheetId)',
-        ]);
-
-        $ids = [];
-
-        foreach ($spreadsheet->getSheets() ?? [] as $sheet) {
-            $properties = $sheet->getProperties();
-
-            if ($properties === null || $properties->getTitle() === null || $properties->getSheetId() === null) {
-                continue;
-            }
-
-            $ids[$properties->getTitle()] = $properties->getSheetId();
-        }
-
-        return $ids;
+        return SheetTabIndex::of($this->sheets, $fileId);
     }
 
     /**

@@ -112,7 +112,7 @@ final class SheetFormatterTest extends TestCase
         $fields = explode(',', $cell->getFields());
 
         self::assertContains('userEnteredFormat.textFormat.bold', $fields);
-        self::assertContains('userEnteredFormat.backgroundColor', $fields);
+        self::assertContains('userEnteredFormat.backgroundColorStyle', $fields);
         self::assertContains('userEnteredFormat.horizontalAlignment', $fields);
         self::assertTrue($cell->getCell()->getUserEnteredFormat()->getTextFormat()->getBold());
         self::assertSame('CENTER', $cell->getCell()->getUserEnteredFormat()->getHorizontalAlignment());
@@ -124,11 +124,14 @@ final class SheetFormatterTest extends TestCase
 
         $this->service()->format('sheet-1')->style('Q3!A1', background: '#FF8000')->apply();
 
-        $colour = $this->sent->getRequests()[0]->getRepeatCell()->getCell()->getUserEnteredFormat()->getBackgroundColor();
+        // Every plain colour field is deprecated in favour of its colorStyle twin, so the
+        // rgbColor inside that is where the floats land.
+        $style = $this->sent->getRequests()[0]->getRepeatCell()->getCell()
+            ->getUserEnteredFormat()->getBackgroundColorStyle();
 
-        self::assertSame(1.0, $colour->getRed());
-        self::assertEqualsWithDelta(0.502, $colour->getGreen(), 0.001);
-        self::assertSame(0.0, $colour->getBlue());
+        self::assertSame(1.0, $style->getRgbColor()->getRed());
+        self::assertEqualsWithDelta(0.502, $style->getRgbColor()->getGreen(), 0.001);
+        self::assertSame(0.0, $style->getRgbColor()->getBlue());
     }
 
     public function testStyleAcceptsAShorthandColour(): void
@@ -137,10 +140,11 @@ final class SheetFormatterTest extends TestCase
 
         $this->service()->format('sheet-1')->style('Q3!A1', background: '#F00')->apply();
 
-        $colour = $this->sent->getRequests()[0]->getRepeatCell()->getCell()->getUserEnteredFormat()->getBackgroundColor();
+        $style = $this->sent->getRequests()[0]->getRepeatCell()->getCell()
+            ->getUserEnteredFormat()->getBackgroundColorStyle();
 
-        self::assertSame(1.0, $colour->getRed());
-        self::assertSame(0.0, $colour->getGreen());
+        self::assertSame(1.0, $style->getRgbColor()->getRed());
+        self::assertSame(0.0, $style->getRgbColor()->getGreen());
     }
 
     /**

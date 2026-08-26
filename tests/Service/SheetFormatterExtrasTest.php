@@ -69,7 +69,7 @@ final class SheetFormatterExtrasTest extends TestCase
 
         self::assertSame('DASHED', $borders->getInnerHorizontal()->getStyle());
         self::assertSame('DASHED', $borders->getInnerVertical()->getStyle());
-        self::assertEqualsWithDelta(0.533, $borders->getTop()->getColor()->getRed(), 0.001);
+        self::assertEqualsWithDelta(0.533, $borders->getTop()->getColorStyle()->getRgbColor()->getRed(), 0.001);
     }
 
     public function testBordersCanDrawOnlyTheInnerGrid(): void
@@ -112,6 +112,7 @@ final class SheetFormatterExtrasTest extends TestCase
             ->apply();
 
         $rule = $this->sent->getRequests()[0]->getAddConditionalFormatRule()->getRule();
+        self::assertNotNull($rule->getBooleanRule()->getFormat()->getBackgroundColorStyle());
 
         self::assertSame('NUMBER_LESS', $rule->getBooleanRule()->getCondition()->getType());
         self::assertSame('0', $rule->getBooleanRule()->getCondition()->getValues()[0]->getUserEnteredValue());
@@ -210,8 +211,12 @@ final class SheetFormatterExtrasTest extends TestCase
 
         $banding = $this->sent->getRequests()[0]->getAddBanding()->getBandedRange();
 
-        self::assertSame(1.0, $banding->getRowProperties()->getFirstBandColor()->getRed());
-        self::assertEqualsWithDelta(0.953, $banding->getRowProperties()->getSecondBandColor()->getRed(), 0.001);
+        self::assertSame(1.0, $banding->getRowProperties()->getFirstBandColorStyle()->getRgbColor()->getRed());
+        self::assertEqualsWithDelta(
+            0.953,
+            $banding->getRowProperties()->getSecondBandColorStyle()->getRgbColor()->getRed(),
+            0.001
+        );
     }
 
     // ----------------------------------------------------------- tab looks
@@ -232,8 +237,8 @@ final class SheetFormatterExtrasTest extends TestCase
 
         $update = $this->sent->getRequests()[0]->getUpdateSheetProperties();
 
-        self::assertSame(1.0, $update->getProperties()->getTabColor()->getGreen());
-        self::assertSame('tabColor', $update->getFields());
+        self::assertSame(1.0, $update->getProperties()->getTabColorStyle()->getRgbColor()->getGreen());
+        self::assertSame('tabColorStyle', $update->getFields());
     }
 
     public function testEverythingStillTravelsInOneRequest(): void
