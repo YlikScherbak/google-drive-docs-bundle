@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-27
+
 ### Fixed
 - The static-analysis check that 1.1.0 added to the lowest-dependencies CI job failed there, which
   is the check doing its job and the release shipping red anyway. On symfony/config 6.4 every
@@ -793,7 +795,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.9...v1.1.0
 [1.0.9]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.7...v1.0.8
