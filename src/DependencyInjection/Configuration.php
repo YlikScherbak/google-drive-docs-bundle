@@ -21,10 +21,15 @@ class Configuration implements ConfigurationInterface
         $treeBuilder = new TreeBuilder('google_drive_docs');
 
         $root = $treeBuilder->getRootNode();
-        // symfony/config 6.4 annotates getRootNode() as returning the narrower NodeDefinition, so
-        // static analysis reports children() as undefined there while the runtime is fine. The
-        // assertion is compiled out in production and is what lets the analysis run against the
-        // oldest versions the package allows.
+        // symfony/config 6.4 annotates getRootNode() as the narrower NodeDefinition, so analysis
+        // against the oldest versions this package allows reports children() as undefined while the
+        // runtime is perfectly happy. The assertion is compiled out in production.
+        //
+        // The rest of the chain has the same problem and cannot be fixed the same way: on 6.4 each
+        // ->end() is annotated as returning NodeParentInterface, so every node after the first is
+        // unresolvable. That one is ignored in phpstan.neon.dist rather than worked around here —
+        // restructuring a fluent builder to satisfy an old annotation set would make this file
+        // worse to read for no gain at runtime.
         \assert($root instanceof ArrayNodeDefinition);
 
         $root

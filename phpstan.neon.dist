@@ -6,3 +6,13 @@ parameters:
         # and putting it under analysis is what found the appProperties annotation in 1.0.6.
         - tools
     treatPhpDocTypesAsCertain: false
+    ignoreErrors:
+        # symfony/config 6.4 annotates every ->end() in a fluent tree as returning
+        # NodeParentInterface, so on the lowest supported dependencies each node after the first
+        # reads as a call on the wrong type. The runtime is unaffected and 7.x annotates it
+        # correctly; reportUnmatched keeps this from failing there, where the error does not occur.
+        -
+            identifier: method.notFound
+            message: '#Call to an undefined method Symfony\\Component\\Config\\Definition\\Builder\\NodeParentInterface::#'
+            path: src/DependencyInjection/Configuration.php
+            reportUnmatched: false

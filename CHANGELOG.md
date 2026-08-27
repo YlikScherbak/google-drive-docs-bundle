@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The static-analysis check that 1.1.0 added to the lowest-dependencies CI job failed there, which
+  is the check doing its job and the release shipping red anyway. On symfony/config 6.4 every
+  `->end()` in a configuration tree is annotated as returning `NodeParentInterface`, so each node
+  after the first reads as a call on the wrong type — the runtime is unaffected, and 7.x annotates
+  it correctly.
+
+  Ignored for that one file and that one message rather than worked around in the code:
+  restructuring a fluent builder to satisfy an old annotation set would make it worse to read and
+  change nothing that runs. Verified by installing the lowest dependencies and running both the
+  analysis and the suite against them, rather than by reasoning about which annotation applies —
+  the first attempt at this was a guess, and it was wrong.
+
 ## [1.1.0] - 2026-08-27
 
 An external audit of 1.0.9 read all 6,039 lines, ran its findings as reproduction scripts against
