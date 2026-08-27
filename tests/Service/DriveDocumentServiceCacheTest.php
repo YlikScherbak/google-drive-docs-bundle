@@ -127,7 +127,9 @@ final class DriveDocumentServiceCacheTest extends TestCase
 
         self::assertCount(1, $this->service(true, false, 0)->listFolder());
         self::assertCount(1, $this->service(true, false, 0)->listFolder());
-        self::assertFalse($this->cache->hasItem('google_drive_docs.grants.' . sha1('doc-1')));
+        // The key carries the version, and leaving it out made this assertion pass on a
+        // key that never existed.
+        self::assertFalse($this->cache->hasItem('google_drive_docs.grants.v2.' . sha1('doc-1')));
     }
 
     public function testProgrammingErrorsInTheSharingLookupAreNotSwallowed(): void
@@ -149,6 +151,88 @@ final class DriveDocumentServiceCacheTest extends TestCase
 
         self::assertCount(1, $this->service(false)->listFolder());
         self::assertCount(1, $this->service(false)->listFolder());
+    }
+
+    public function testAnInheritedGrantIsNotCachedUnderTheChild(): void
+    {
+        // The one that made revoking on a folder a promise the cache did not keep. On a Shared
+        // Drive, permissions.list on a child returns the grants it inherits as well; caching those
+        // under the child's own key meant that clearing the folder's entry cleared nothing the
+        // child would read, and the access outlived its revocation by up to the TTL.
+        $this->files->method('get')->willReturnCallback(
+            fn (string $id): DriveFile => new DriveFile([
+                'id'      => $id,
+                'parents' => [$id === 'child-1' ? 'folder-1' : self::DRIVE_ID],
+            ])
+        );
+
+        $this->permissions->method('listPermissions')->willReturnCallback(
+            fn (string $id): PermissionList => $id === 'child-1'
+                // What Drive shows on the child: the folder's grant, marked as inherited.
+                ? $this->permissionList(['viewer@example.com'], inherited: true)
+                // And the folder itself, where the grant has just been revoked.
+                : $this->permissionList([])
+        );
+
+        self::assertFalse(
+            $this->service()->canAccess('child-1'),
+            'a grant revoked on the folder still opened the file inside it'
+        );
+    }
+
+    public function testMembershipOfTheDriveItselfStillCounts(): void
+    {
+        // Drive reports every member of the Shared Drive on every item, inherited from the drive.
+        // That is not inheritance from a folder: the walk stops at the root without reading it, so
+        // dropping the grant would leave it nowhere to be found and would hide documents from
+        // people who can open them in Drive directly.
+        $this->files->method('get')->willReturn(new DriveFile([
+            'id'      => 'child-1',
+            'parents' => [self::DRIVE_ID],
+        ]));
+
+        $list = new PermissionList();
+        $list->setPermissions([new GooglePermission([
+            'emailAddress'      => 'viewer@example.com',
+            'type'              => DrivePermission::TYPE_USER,
+            'role'              => 'writer',
+            'permissionDetails' => [['inherited' => true, 'inheritedFrom' => self::DRIVE_ID]],
+        ])]);
+        $this->permissions->method('listPermissions')->willReturn($list);
+
+        self::assertTrue($this->service()->canAccess('child-1'));
+    }
+
+    public function testTheAncestorGrantIsStillFound(): void
+    {
+        // The control, and the cost of the fix: the walk now has to reach the folder that holds
+        // the grant rather than stopping at the child's copy of it.
+        $this->files->method('get')->willReturnCallback(
+            fn (string $id): DriveFile => new DriveFile([
+                'id'      => $id,
+                'parents' => [$id === 'child-1' ? 'folder-1' : self::DRIVE_ID],
+            ])
+        );
+
+        $this->permissions->method('listPermissions')->willReturnCallback(
+            fn (string $id): PermissionList => $id === 'child-1'
+                ? $this->permissionList(['viewer@example.com'], inherited: true)
+                : $this->permissionList(['viewer@example.com'])
+        );
+
+        self::assertTrue($this->service()->canAccess('child-1'));
+    }
+
+    public function testADirectGrantOnTheItemStillCounts(): void
+    {
+        $this->files->method('get')->willReturn(new DriveFile([
+            'id'      => 'child-1',
+            'parents' => [self::DRIVE_ID],
+        ]));
+        $this->permissions->method('listPermissions')
+            ->willReturn($this->permissionList(['viewer@example.com']));
+
+        self::assertTrue($this->service()->canAccess('child-1'));
     }
 
     private function service(bool $withCache = true, bool $asAdministrator = false, int $ttl = 300): DriveDocumentService
@@ -192,15 +276,19 @@ final class DriveDocumentServiceCacheTest extends TestCase
 
     /**
      * @param string[] $emails
+     * @param bool     $inherited as Drive marks a grant that lives on an ancestor
      */
-    private function permissionList(array $emails): PermissionList
+    private function permissionList(array $emails, bool $inherited = false): PermissionList
     {
         $list = new PermissionList();
         $list->setPermissions(array_map(
             static fn (string $email): GooglePermission => new GooglePermission([
-                'emailAddress' => $email,
-                'type'         => DrivePermission::TYPE_USER,
-                'role'         => 'writer',
+                'emailAddress'      => $email,
+                'type'              => DrivePermission::TYPE_USER,
+                'role'              => 'writer',
+                'permissionDetails' => $inherited
+                    ? [['inherited' => true, 'inheritedFrom' => 'folder-1']]
+                    : [['inherited' => false]],
             ]),
             $emails
         ));

@@ -12,18 +12,24 @@ use Symfony\Component\DependencyInjection\Definition;
 
 /**
  * A misconfigured cache pool must be noticed, but must not break the application.
+ *
+ * It says so through the compiler log alone. It used to raise a user warning as well, and an
+ * application with a handler that turns warnings into exceptions had cache:clear fail on what was
+ * meant to be a note — a hard failure for a typo in an optional setting.
  */
 final class ValidateCachePoolPassTest extends TestCase
 {
-    public function testAMissingPoolIsReportedWithoutBreakingTheBuild(): void
+    public function testAMissingPoolIsReportedInTheCompilerLog(): void
     {
         $container = $this->containerWithPool('cache.typo');
 
         $warnings = $this->runPass($container);
 
-        self::assertCount(1, $warnings);
-        self::assertStringContainsString('cache.typo', $warnings[0]);
-        self::assertNotEmpty($container->getCompiler()->getLog());
+        $log = $container->getCompiler()->getLog();
+
+        self::assertCount(1, $log);
+        self::assertStringContainsString('cache.typo', $log[0]);
+        self::assertSame([], $warnings, 'a warning here breaks builds that promote them to errors');
     }
 
     public function testAnExistingPoolPassesQuietly(): void
@@ -32,6 +38,7 @@ final class ValidateCachePoolPassTest extends TestCase
         $container->setDefinition('cache.app', new Definition(\stdClass::class));
 
         self::assertSame([], $this->runPass($container));
+        self::assertSame([], $container->getCompiler()->getLog());
     }
 
     public function testNoPoolConfiguredMeansNothingToValidate(): void
@@ -39,6 +46,7 @@ final class ValidateCachePoolPassTest extends TestCase
         $container = $this->containerWithPool(null);
 
         self::assertSame([], $this->runPass($container));
+        self::assertSame([], $container->getCompiler()->getLog());
     }
 
     private function containerWithPool(?string $pool): ContainerBuilder

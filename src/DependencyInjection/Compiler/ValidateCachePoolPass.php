@@ -36,7 +36,9 @@ final class ValidateCachePoolPass implements CompilerPassInterface
             $pool
         );
 
+        // The compiler log and nothing else: an application with a throwing error handler turned
+        // this warning into an exception during cache:clear, which is a hard failure for something
+        // meant to be a note.
         $container->log($this, $message);
-        @trigger_error($message, \E_USER_WARNING);
     }
 }

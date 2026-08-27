@@ -38,6 +38,8 @@ class GoogleDriveDocsExtension extends Extension
             $config['retry']['attempts'],
             $config['retry']['initial_delay'],
             $config['retry']['max_delay'],
+            $config['http']['timeout'],
+            $config['http']['connect_timeout'],
         ]);
         $factory->setPublic(false);
         $container->setDefinition(GoogleClientFactory::class, $factory);
@@ -87,6 +89,8 @@ class GoogleDriveDocsExtension extends Extension
         // Checked after every bundle registered its services (see ValidateCachePoolPass).
         $container->setParameter(ValidateCachePoolPass::POOL_PARAMETER, $config['permission_cache']['pool']);
         $service->setPublic(true);
+        // The per-request sharing memo has to be cleared between requests in a worker runtime.
+        $service->addTag('kernel.reset', ['method' => 'reset']);
         $container->setDefinition(DriveDocumentService::class, $service);
         $container->setAlias('google_drive_docs.service', DriveDocumentService::class)->setPublic(true);
 
@@ -107,7 +111,12 @@ class GoogleDriveDocsExtension extends Extension
 
         // Resolves a DriveDocument straight into a controller argument.
         $resolver = new Definition(DriveDocumentResolver::class, [new Reference(DriveDocumentService::class)]);
-        $resolver->addTag('controller.argument_value_resolver', ['priority' => 100]);
+        // Above 100, where FrameworkBundle registers its own RequestAttributeValueResolver. On a
+        // tie the order falls back to registration order and FrameworkBundle is normally first,
+        // so a route parameter named after the argument — #[Route('/d/{document}')] with a
+        // DriveDocument $document — was resolved as the raw string and the controller got a
+        // TypeError. Winning the comparison outright is what makes that documented example work.
+        $resolver->addTag('controller.argument_value_resolver', ['priority' => 110]);
         $container->setDefinition(DriveDocumentResolver::class, $resolver);
 
         // Only useful with the security component installed; registering it without would

@@ -7,6 +7,8 @@ namespace Borsche\GoogleDriveDocsBundle\Client;
 use Borsche\GoogleDriveDocsBundle\Exception\NotConfiguredException;
 use Google\Client;
 use Google\Task\Runner;
+use GuzzleHttp\Client as GuzzleClient;
+use GuzzleHttp\HandlerStack;
 
 /**
  * Builds an authenticated Google client from an OAuth refresh token.
@@ -24,6 +26,16 @@ class GoogleClientFactory
     ];
 
     public const DEFAULT_RETRY_ATTEMPTS = 3;
+
+    /**
+     * Both default to a limit rather than to none.
+     *
+     * Guzzle's own default is `timeout => 0`, which means wait for ever: a TCP session that Google
+     * never answers held a PHP-FPM worker until the process was killed, and the timeout error that
+     * would have ended it never arrived.
+     */
+    public const DEFAULT_TIMEOUT         = 30.0;
+    public const DEFAULT_CONNECT_TIMEOUT = 10.0;
     public const DEFAULT_INITIAL_DELAY  = 1.0;
     public const DEFAULT_MAX_DELAY      = 60.0;
 
@@ -50,12 +62,11 @@ class GoogleClientFactory
         'userRateLimitExceeded' => Runner::TASK_RETRY_ALWAYS,
         'backendError'          => Runner::TASK_RETRY_ALWAYS,
         'internalError'         => Runner::TASK_RETRY_ALWAYS,
-        // Network-level curl failures, worth one more go.
-        6                       => Runner::TASK_RETRY_ALWAYS, // CURLE_COULDNT_RESOLVE_HOST
-        7                       => Runner::TASK_RETRY_ALWAYS, // CURLE_COULDNT_CONNECT
-        28                      => Runner::TASK_RETRY_ALWAYS, // CURLE_OPERATION_TIMEOUTED
-        35                      => Runner::TASK_RETRY_ALWAYS, // CURLE_SSL_CONNECT_ERROR
-        52                      => Runner::TASK_RETRY_ALWAYS, // CURLE_GOT_NOTHING
+        // Curl error codes used to sit here too, inherited from the client's own default map.
+        // They never fired: the task runner catches Google\Service\Exception alone, and a
+        // connection that never opened arrives as a Guzzle ConnectException, which the REST layer
+        // rethrows untouched because it carries no response. Connection-level failures are retried
+        // by the middleware in httpClient() instead, one layer lower, where they actually appear.
     ];
 
     public function __construct(
@@ -65,6 +76,10 @@ class GoogleClientFactory
         private readonly int $retryAttempts = self::DEFAULT_RETRY_ATTEMPTS,
         private readonly float $retryInitialDelay = self::DEFAULT_INITIAL_DELAY,
         private readonly float $retryMaxDelay = self::DEFAULT_MAX_DELAY,
+        /** Seconds for a whole request; 0 leaves Guzzle's own default, which is no limit at all. */
+        private readonly float $timeout = self::DEFAULT_TIMEOUT,
+        /** Seconds to get the connection open. */
+        private readonly float $connectTimeout = self::DEFAULT_CONNECT_TIMEOUT,
     ) {
     }
 
@@ -106,6 +121,7 @@ class GoogleClientFactory
         }
 
         $client = new Client($this->retryConfig());
+        $client->setHttpClient($this->httpClient((string) $client->getConfig('base_path')));
         $client->setClientId($this->clientId);
         $client->setClientSecret($this->clientSecret);
         $client->setScopes(self::SCOPES);
@@ -114,6 +130,48 @@ class GoogleClientFactory
         $client->setPrompt('consent');
 
         return $client;
+    }
+
+    /**
+     * The HTTP client the Google client will use, with limits and one retry the SDK does not do.
+     *
+     * Two things are added and the SDK's own two are kept. `base_uri` and `http_errors => false`
+     * are what `Google\Client` sets when it builds its own, and the second is load-bearing: the
+     * REST layer reads the status off the response rather than catching an exception.
+     *
+     * The retry is for connection-level failures only — DNS, connect, TLS, an empty reply. Those
+     * never reach the task runner, so before this they were not retried at all despite a map that
+     * suggested otherwise. Responses are left alone here: a 429 or a 503 comes back as a response
+     * (http_errors is off), so the decider sees no exception and the task runner handles it. The
+     * two ladders cannot stack, because they trigger on disjoint outcomes.
+     */
+    private function httpClient(string $baseUri): GuzzleClient
+    {
+        $stack = HandlerStack::create();
+
+        if ($this->retryAttempts > 0) {
+            $stack->push(RetryOnConnectionFailure::middleware(
+                $this->retryAttempts,
+                $this->retryInitialDelay,
+                $this->retryMaxDelay
+            ));
+        }
+
+        $options = [
+            'base_uri'    => $baseUri,
+            'http_errors' => false,
+            'handler'     => $stack,
+        ];
+
+        if ($this->timeout > 0) {
+            $options['timeout'] = $this->timeout;
+        }
+
+        if ($this->connectTimeout > 0) {
+            $options['connect_timeout'] = $this->connectTimeout;
+        }
+
+        return new GuzzleClient($options);
     }
 
     /**

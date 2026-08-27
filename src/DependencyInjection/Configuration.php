@@ -6,6 +6,7 @@ namespace Borsche\GoogleDriveDocsBundle\DependencyInjection;
 
 use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
+use Symfony\Component\Config\Definition\Builder\ArrayNodeDefinition;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
@@ -19,7 +20,14 @@ class Configuration implements ConfigurationInterface
     {
         $treeBuilder = new TreeBuilder('google_drive_docs');
 
-        $treeBuilder->getRootNode()
+        $root = $treeBuilder->getRootNode();
+        // symfony/config 6.4 annotates getRootNode() as returning the narrower NodeDefinition, so
+        // static analysis reports children() as undefined there while the runtime is fine. The
+        // assertion is compiled out in production and is what lets the analysis run against the
+        // oldest versions the package allows.
+        \assert($root instanceof ArrayNodeDefinition);
+
+        $root
             ->children()
                 ->scalarNode('client_id')
                     ->defaultValue('')
@@ -101,6 +109,22 @@ class Configuration implements ConfigurationInterface
                             ->defaultValue(GoogleClientFactory::DEFAULT_MAX_DELAY)
                             ->min(0.001)
                             ->info('Upper bound in seconds for a single wait.')
+                        ->end()
+                    ->end()
+                ->end()
+                ->arrayNode('http')
+                    ->info('Limits on the HTTP calls to Google. Both default to a limit rather than none.')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->floatNode('timeout')
+                            ->defaultValue(GoogleClientFactory::DEFAULT_TIMEOUT)
+                            ->min(0)
+                            ->info('Seconds for a whole request. 0 waits for ever, which is Guzzle\'s own default.')
+                        ->end()
+                        ->floatNode('connect_timeout')
+                            ->defaultValue(GoogleClientFactory::DEFAULT_CONNECT_TIMEOUT)
+                            ->min(0)
+                            ->info('Seconds to get the connection open. 0 waits for ever.')
                         ->end()
                     ->end()
                 ->end()

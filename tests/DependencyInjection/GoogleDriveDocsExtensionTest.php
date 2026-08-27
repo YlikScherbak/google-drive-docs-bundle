@@ -6,6 +6,7 @@ namespace Borsche\GoogleDriveDocsBundle\Tests\DependencyInjection;
 
 use Borsche\GoogleDriveDocsBundle\Client\GoogleClientFactory;
 use Borsche\GoogleDriveDocsBundle\Contract\ViewerContextInterface;
+use Borsche\GoogleDriveDocsBundle\Controller\DriveDocumentResolver;
 use Borsche\GoogleDriveDocsBundle\DependencyInjection\GoogleDriveDocsExtension;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
@@ -36,6 +37,23 @@ final class GoogleDriveDocsExtensionTest extends TestCase
         self::assertTrue(
             $container->getDefinition('google_drive_docs.client')->isLazy(),
             'a request that does not touch Drive would pay for an OAuth round trip'
+        );
+
+        // FrameworkBundle registers RequestAttributeValueResolver at 100 and is normally first, so
+        // a tie hands #[Route('/d/{document}')] to it and the controller receives the raw string.
+        $tag = $container->getDefinition(DriveDocumentResolver::class)
+            ->getTag('controller.argument_value_resolver')[0] ?? [];
+
+        self::assertGreaterThan(
+            100,
+            $tag['priority'] ?? 0,
+            'a route parameter named after the argument would resolve to a string'
+        );
+
+        // And the sharing memo has to be cleared between requests in a worker runtime.
+        self::assertSame(
+            [['method' => 'reset']],
+            $container->getDefinition(DriveDocumentService::class)->getTag('kernel.reset')
         );
         self::assertTrue($container->hasAlias(ViewerContextInterface::class));
         self::assertTrue($container->hasAlias('google_drive_docs.service'));

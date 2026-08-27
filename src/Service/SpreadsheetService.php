@@ -167,7 +167,15 @@ class SpreadsheetService
         $this->assertBatchSize(count($ranges));
 
         $response = $this->sheets->spreadsheets_values->batchGet($fileId, [
-            'ranges'            => array_values($ranges),
+            // These ranges travel as query parameters, and the client URL-decodes each one before
+            // re-encoding it, so a per cent sign in a tab name would come back as something else
+            // entirely. Only the per cent sign is escaped: the quotes in `'Q3'!A1` are A1 notation
+            // and have to arrive as quotes. Every other range on this service travels in the path
+            // or in a JSON body, where the client encodes properly.
+            'ranges'            => array_map(
+                static fn (string $range): string => str_replace('%', '%25', $range),
+                array_values($ranges)
+            ),
             'valueRenderOption' => $render,
         ]);
 

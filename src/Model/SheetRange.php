@@ -206,10 +206,17 @@ final class SheetRange
         // Caught here rather than at Google: a column this far out is a typo in the
         // notation, and a 400 three calls later says nothing about which range caused it.
         if ($column >= self::MAX_COLUMNS) {
+            // A tab name reaches here too — "Sheet1" parses as a cell in column SHEET — and being
+            // told about columns when you meant a tab is a confusing way to find that out. Google's
+            // own rule is that a bare name is a cell reference, so the fix is the quoting, and the
+            // message says so.
             throw new \InvalidArgumentException(sprintf(
-                '"%s" names column %s, past ZZZ, the last one a spreadsheet has.',
+                '"%s" names column %s, past ZZZ, the last one a spreadsheet has. '
+                . 'If %s is a tab rather than a cell, quote it: \'%s\'!A1.',
                 $original,
-                strtoupper($m[1])
+                strtoupper($m[1]),
+                $original,
+                $original
             ));
         }
 

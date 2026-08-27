@@ -39,7 +39,7 @@ This bundle implements the second option: file management, folder navigation, sh
 - **Paginated listings** — one Google call per page, so a drive with thousands of files stays fast
 - **Create / rename / move** documents and folders
 - **Duplicate documents and instantiate templates** — formulas, sheets and formatting come along
-- **Export** to XLSX, CSV, PDF, DOCX and more, streamed straight to the browser
+- **Export** to XLSX, CSV, PDF, DOCX and more, as a PSR-7 stream you can pipe to the browser
 - **Import** an `.xlsx`/`.csv`/`.docx` upload of any size and have Google convert it into an
   editable document
 - **Link documents to your own records** — store the order or contract id on the file and
@@ -238,7 +238,7 @@ $duplicate = $this->drive->copy($doc->id);                            // beside 
 $duplicate = $this->drive->copy($doc->id, 'Q4 report', $folderId);    // renamed, elsewhere
 $invoice   = $this->drive->createFromTemplate($templateId, 'Invoice #4711', $folderId);
 
-// Export (streamed, never buffered)
+// Export (a PSR-7 stream; see the note on buffering below)
 $export = $this->drive->export($doc->id, DriveExport::XLSX);
 $export->filename;               // "Q3 report.xlsx"
 $export->mimeType;               // the format you actually got
@@ -462,6 +462,15 @@ $other->listFolder();
 Everything else carries over unchanged: the viewer context, the MIME types, the cache and its
 lifetime, the upload limits. The instance you called it on is untouched, and asking for the drive
 it already points at hands back the same object.
+
+## How two addresses are compared
+
+A grant is matched to a viewer by e-mail, lower-cased and trimmed. The `+tag` suffix is folded away
+**only on `gmail.com` and `googlemail.com`**, because those are the domains Google itself ignores it
+on. Folding it everywhere meant `alice+anything@corp.com` matched a grant to `alice@corp.com` and the
+other way round, which on any domain that treats the tag as part of the address is a way to be handed
+someone else's access. Dots are not folded on Gmail either: keeping them can only fail to match,
+never match too much.
 
 ## Per-user visibility
 
@@ -1047,7 +1056,17 @@ not need a release on this one.
 
 ## Exporting
 
-`export()` returns a `DriveExport` whose `stream` is the live response body, so a download
+**On buffering.** `export()` hands back a PSR-7 stream, and it reads well as one, but the body
+has already been received when you get it: the SDK's transport is not asked to stream, so Guzzle
+writes the response into a `php://temp` handle first. Memory stays flat — that handle spills to disk
+past 2 MB, and a peak around 2 MB was measured — but the first byte arrives only after the last one,
+and a large uploaded file becomes a temporary file on the way through. `exportRevision()` is
+different: it fetches the export link itself and does ask for a stream.
+
+Google caps an export of a Google-format document at 10 MB, so that path is bounded whatever
+happens. `export()` of an **uploaded** file is not, and that is the case to keep in mind.
+
+`export()` returns a `DriveExport` whose `stream` is the response body, so a download
 never passes through your PHP memory:
 
 ```php
@@ -1094,7 +1113,10 @@ Exporting is a read operation: it dispatches no event.
   `NotCopyableException`. To duplicate a tree, recreate the folders with `createFolder()` and
   copy each file into them.
 - **Without a target folder the copy lands next to the original**, matching Google's default.
-  Pass a folder id to place it elsewhere; the Shared Drive root is addressable by the drive id.
+  Pass a folder id to place it elsewhere; the Shared Drive root is addressable by the drive id, or
+  by `null`. An **empty string** counts as `null` everywhere a parent is taken — `?parentId=` in a
+  query string arrives as `''`, and the paths used to disagree about it: creating fell back to the
+  root but announced a parent of `''`, copying sent Google `parents: ['']`, and listing refused it.
 - **The copy does not carry the original's sharing.** On a Shared Drive a new file inherits the
   permissions of the folder it lands in, so copying a narrowly-shared document into a widely
   shared folder widens who can see it. Choose the destination deliberately.
@@ -1239,13 +1261,34 @@ Google throttles per user and per project, and a busy listing page can trip that
 box every call is retried up to three times with exponential backoff and jitter, so a single
 rate-limit answer no longer reaches your user as an error.
 
-What is retried: HTTP **429**, **500**, **502**, **503**, **504**, the Drive reasons
-`rateLimitExceeded`, `userRateLimitExceeded`, `backendError` and `internalError` (Drive reports
-quota problems behind a 403 with one of those), and connection-level curl failures — DNS,
-connect, timeout, TLS handshake, empty reply.
+What is retried, and by which of the two layers that do it:
+
+- **Answers from Google** — HTTP **429**, **500**, **502**, **503**, **504**, and the Drive reasons
+  `rateLimitExceeded`, `userRateLimitExceeded`, `backendError` and `internalError` (Drive reports
+  quota problems behind a 403 with one of those). This is the SDK's own task runner.
+- **Connections that never opened** — DNS, connect, timeout, TLS handshake, empty reply. These are
+  retried by a middleware this bundle adds, because the task runner cannot see them: it catches
+  `Google\Service\Exception` alone, and a connection failure arrives as a Guzzle exception carrying
+  no response. Curl error codes used to sit in the retry map for this and never fired.
+
+The two cannot stack: a response is handled by the first and an exception by the second, and the
+same failure is never both.
 
 What is **not** retried, on purpose: 400, 401, 403 without a rate-limit reason, and 404.
 Repeating those cannot change the answer and only burns quota.
+
+### Limits on each call
+
+```yaml
+google_drive_docs:
+    http:
+        timeout: 30.0          # seconds for a whole request
+        connect_timeout: 10.0  # seconds to get the connection open
+```
+
+Both default to a limit rather than to none. Guzzle's own default is `timeout => 0`, which waits for
+ever: a TCP session Google never answers held a PHP-FPM worker until the process was killed, and the
+timeout error that would have ended it never came. Set either to `0` for that behaviour back.
 
 Set `retry.attempts: 0` to switch retrying off — useful in tests, where you want a failure to
 surface immediately rather than after three backoff waits.
@@ -1306,8 +1349,36 @@ UI never shows stale access. Changes made **directly in Google** used to wait fo
 `changesSince()` and they clear the affected entry too — see "Keeping up with changes made in
 Google". Without polling, keep the TTL short if people also share from the Drive interface.
 
+That promise holds because each item caches only what is granted **on it**. On a Shared Drive the
+sharing list of a file also reports what it inherits from the folders above it, and keeping those
+under the file's own key made the sentence above false in the case that matters most: revoking on a
+folder cleared the folder's entry and nothing the file inside it would read, so the access outlived
+its revocation by up to the TTL. Inherited grants are now recognised and left to the ancestor that
+grants them, which the walk reads on its own.
+
+**In a worker runtime, call `reset()` between requests** — or let Symfony do it, which it does: the
+service is tagged `kernel.reset`. The lookups made while answering one request are memoised in the
+instance, and under FrankenPHP, RoadRunner, Swoole or a Messenger consumer that instance lives as
+long as the process. Without the reset those answers outlast any TTL, and outlast it even with no
+pool configured at all.
+
+**When the sharing lookup itself fails**, the two paths answer differently on purpose. A listing
+hides what it cannot check — losing one lookup must not lose the page — and after the first failure
+it stops trying for the rest of the request rather than repeating the retry ladder once per item; a
+page of a thousand items used to sleep through that ladder a thousand times and return nothing. A
+question about **one** item raises the error instead, because answering "not shared with you" would
+turn an outage into a denial that the caller cannot tell apart from a real one. Pass a PSR-3 logger
+as the last constructor argument to see the hidden ones:
+
+```yaml
+services:
+    Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService:
+        arguments:
+            $logger: '@logger'
+```
+
 Caching is entirely optional: with no pool configured the bundle simply queries Google every
-time. If the configured pool does not exist, the application still boots — you get a warning
+time. If the configured pool does not exist, the application still boots — you get a note
 in the compiler log instead of a silent slowdown.
 
 ## Contributing

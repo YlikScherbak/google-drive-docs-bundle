@@ -64,6 +64,11 @@ use Psr\EventDispatcher\EventDispatcherInterface;
  * Ranges are A1 notation, as everywhere else in the bundle; the numeric sheet ids Google's
  * formatting calls actually want are resolved at apply() with a single lookup.
  *
+ * One difference worth naming: a range with no tab in it formats the spreadsheet's **first** tab,
+ * while the values API writes to the first **visible** one. They part company only when the first
+ * tab is hidden, and they cannot be reconciled here without changing what SheetTabIndex returns,
+ * which is public. Name the tab — `style('Q3!A1:D1', ...)` — and the question does not arise.
+ *
  * As in DriveDocumentService, `Google\Service\Exception` propagates rather than being wrapped.
  */
 class SheetFormatter

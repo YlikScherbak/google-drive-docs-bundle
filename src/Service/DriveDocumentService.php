@@ -35,6 +35,7 @@ use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePage;
 use Borsche\GoogleDriveDocsBundle\Model\DrivePermission;
 use Borsche\GoogleDriveDocsBundle\Model\DriveRevision;
+use Google\Model as GoogleModel;
 use Google\Service\Drive;
 use Google\Http\MediaFileUpload;
 use Google\Service\Drive\DriveFile;
@@ -45,6 +46,8 @@ use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Drive\Revision as GoogleRevision;
 use Google\Service\Exception as GoogleServiceException;
 use Psr\Cache\CacheItemPoolInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Contracts\Service\ResetInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
@@ -63,7 +66,7 @@ use Psr\EventDispatcher\EventDispatcherInterface;
  * more useful about — an inherited grant, a folder asked to be copied — get an exception of
  * their own; those are the ones carrying a `@throws`.
  */
-class DriveDocumentService
+class DriveDocumentService implements ResetInterface
 {
     public const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
@@ -193,6 +196,39 @@ class DriveDocumentService
     private array $grantCache = [];
 
     /**
+     * Set once a sharing lookup has failed on a path that hides failures.
+     *
+     * Every item in a filtered listing costs its own permissions.list, and every one of those
+     * carries its own ladder of retries. Under a sustained 5xx that made a single request sleep
+     * through the ladder once per item — minutes for a page, hours for a large one — and then
+     * return an empty list anyway. The first failure is already the answer: the lookups are not
+     * available for this request, so the rest are skipped rather than retried.
+     */
+    private bool $grantLookupUnavailable = false;
+
+    /**
+     * The files read while walking up the parents, for this request.
+     *
+     * One controller answering one route asks the same questions of the same chain several times
+     * over: the resolver fetches the document, the voter asks whether the viewer may edit it, the
+     * action renames it. Each of those walked the whole chain again — thirteen files.get for one
+     * request three folders deep, eight of them repeats of the two before it.
+     *
+     * Only the fields the walk itself needs are stored, and only for the walk: everything the
+     * caller gets back is fetched separately with its own field list, so nothing here can hand
+     * out a stale name.
+     *
+     * @var array<string, DriveFile|null> fileId => the file, or null when Drive refused to show it
+     */
+    private array $walkFiles = [];
+
+    /** @var array<string, bool> memo of canAccess() within this request */
+    private array $accessMemo = [];
+
+    /** @var array<string, string|null> memo of roleOf() within this request */
+    private array $roleMemo = [];
+
+    /**
      * @param string[] $documentMimeTypes
      */
     public function __construct(
@@ -208,6 +244,14 @@ class DriveDocumentService
         private readonly int $maxUploadBytes = 0,
         /** Bytes per resumable chunk. Bigger is fewer round trips and more memory. */
         private readonly int $chunkBytes = 8 * 1024 * 1024,
+        /**
+         * Told when a sharing lookup fails and the failure is deliberately hidden.
+         *
+         * That is the one thing here worth a log line rather than an event: hiding a document
+         * from a listing because Google was briefly unavailable looks exactly like the document
+         * not being shared, and nothing else records the difference.
+         */
+        private readonly ?LoggerInterface $logger = null,
     ) {
         if ($this->chunkBytes <= 0 || $this->chunkBytes % self::CHUNK_GRANULARITY !== 0) {
             throw new \InvalidArgumentException(sprintf(
@@ -452,6 +496,7 @@ class DriveDocumentService
      */
     public function createDocument(string $title, ?string $parentId = null, ?string $mimeType = null): DriveDocument
     {
+        $parentId = $this->normalizeParent($parentId);
         $document = $this->createFile($title, $mimeType ?? $this->defaultDocumentMime(), $parentId);
         $this->dispatch(new DocumentCreatedEvent($document, $parentId));
 
@@ -460,6 +505,7 @@ class DriveDocumentService
 
     public function createFolder(string $title, ?string $parentId = null): DriveDocument
     {
+        $parentId = $this->normalizeParent($parentId);
         $folder = $this->createFile($title, self::FOLDER_MIME, $parentId);
         $this->dispatch(new FolderCreatedEvent($folder, $parentId));
 
@@ -477,6 +523,7 @@ class DriveDocumentService
      */
     public function copy(string $fileId, ?string $title = null, ?string $parentId = null): DriveDocument
     {
+        $parentId = $this->normalizeParent($parentId);
         $this->assertAccess($fileId);
 
         if ($parentId !== null) {
@@ -547,6 +594,7 @@ class DriveDocumentService
      */
     public function move(string $fileId, ?string $parentId): DriveDocument
     {
+        $parentId = $this->normalizeParent($parentId);
         $this->assertConfigured();
         $this->assertAccess($fileId);
 
@@ -926,6 +974,24 @@ class DriveDocumentService
     }
 
     /**
+     * Forgets the sharing looked up during this request.
+     *
+     * "Per request" is an assumption that holds under PHP-FPM and nowhere else: a worker runtime
+     * — FrankenPHP, RoadRunner, Swoole, a Messenger consumer — keeps one instance for the life of
+     * the process and the memo with it, so a sharing change made anywhere else stayed invisible
+     * until the worker restarted, whatever the pool TTL said. Symfony's services_resetter calls
+     * this between requests; the shared pool is left alone, since it has a lifetime of its own.
+     */
+    public function reset(): void
+    {
+        $this->grantCache             = [];
+        $this->grantLookupUnavailable = false;
+        $this->walkFiles              = [];
+        $this->accessMemo             = [];
+        $this->roleMemo               = [];
+    }
+
+    /**
      * Sharing entries of a file or folder, including the ones inherited from parents.
      *
      * @return DrivePermission[]
@@ -957,7 +1023,8 @@ class DriveDocumentService
                 $permissions[] = $this->mapPermission($permission);
             }
 
-            $pageToken = $response->getNextPageToken();
+            // Same as everywhere else: an empty token is the end, not another page.
+            $pageToken = $response->getNextPageToken() ?: null;
         } while ($pageToken !== null);
 
         return $permissions;
@@ -1128,7 +1195,9 @@ class DriveDocumentService
         } catch (GoogleServiceException $e) {
             if ($this->hasReason($e, ['cannotDeletePermission', 'cannotModifyInheritedPermission'])) {
                 throw new InheritedPermissionException(
-                    'This permission is inherited from a parent folder. Change its expiry on that folder instead.'
+                    'This permission is inherited from a parent folder. Change its expiry on that folder instead.',
+                    $e->getCode(),
+                    $e
                 );
             }
 
@@ -1194,7 +1263,9 @@ class DriveDocumentService
         } catch (GoogleServiceException $e) {
             if ($this->hasReason($e, ['cannotDeletePermission', 'cannotModifyInheritedPermission'])) {
                 throw new InheritedPermissionException(
-                    'This permission is inherited from a parent folder. Revoke it on that folder instead.'
+                    'This permission is inherited from a parent folder. Revoke it on that folder instead.',
+                    $e->getCode(),
+                    $e
                 );
             }
 
@@ -1207,11 +1278,63 @@ class DriveDocumentService
     }
 
     /**
+     * One step of the walk up the parents, read once per request.
+     *
+     * Null means Drive would not show the item to the service user at all — a 403 or a 404, which
+     * for this purpose is the same answer as "not shared with anyone we know of". Anything else is
+     * an outage or an expired credential and has to surface, or every document would quietly
+     * disappear for every viewer.
+     */
+    private function walkFile(string $fileId): ?DriveFile
+    {
+        if (array_key_exists($fileId, $this->walkFiles)) {
+            return $this->walkFiles[$fileId];
+        }
+
+        try {
+            return $this->walkFiles[$fileId] = $this->drive->files->get($fileId, [
+                'supportsAllDrives' => true,
+                // expirationTime because the grants Google embeds in a file are checked here too,
+                // and an expired one opened nothing anywhere else.
+                'fields'            => 'id,parents,permissions(emailAddress,type,role,expirationTime)',
+            ]);
+        } catch (GoogleServiceException $e) {
+            if (in_array($e->getCode(), [403, 404], true)) {
+                return $this->walkFiles[$fileId] = null;
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * An empty parent is no parent.
+     *
+     * `?parentId=` in a query string arrives as '' rather than null, and every path treated it
+     * differently: creating fell back to the root but announced a parent of '' in its event,
+     * copying sent Google `parents: ['']`, and listing rejected it outright. One reading for all
+     * of them, and it is the same as null.
+     */
+    private function normalizeParent(?string $parentId): ?string
+    {
+        return $parentId === '' ? null : $parentId;
+    }
+
+    /**
      * Whether the viewer may see an item: shared directly with them, or with any ancestor folder.
      */
     public function canAccess(string $fileId, ?string $email = null): bool
     {
         if ($this->viewerContext->seesEverything()) {
+            return true;
+        }
+
+        // The drive id names the root, which the README says is addressable that way. The walk
+        // stops at the root rather than examining it, so asking about it directly used to answer
+        // false and refuse every call that named it — while the same call with null went through.
+        // Root-level operations are not gated on a per-item grant either way; that is the
+        // application's to decide, and it is documented as such.
+        if ($fileId === $this->sharedDriveId) {
             return true;
         }
 
@@ -1226,34 +1349,31 @@ class DriveDocumentService
             return false;
         }
 
+        $memoKey = $fileId . '|' . implode(',', $identities);
+
+        if (array_key_exists($memoKey, $this->accessMemo)) {
+            return $this->accessMemo[$memoKey];
+        }
+
         $cursor = $fileId;
         $guard  = 0;
 
         while ($cursor !== null && $cursor !== $this->sharedDriveId && $guard++ < 25) {
-            try {
-                $file = $this->drive->files->get($cursor, [
-                    'supportsAllDrives' => true,
-                    'fields'            => 'id,parents,permissions(emailAddress,type,role)',
-                ]);
-            } catch (GoogleServiceException $e) {
-                // An item the service user cannot even see is not shared with anyone we know of.
-                // Anything else — an outage, an expired credential — must surface, or every
-                // document would silently disappear for every viewer.
-                if (in_array($e->getCode(), [403, 404], true)) {
-                    return false;
-                }
+            $file = $this->walkFile($cursor);
 
-                throw $e;
+            if ($file === null) {
+                return $this->accessMemo[$memoKey] = false;
             }
 
-            if ($this->isGrantedTo($file, $identities)) {
-                return true;
+            // A single item: an outage has to surface rather than read as "not shared with you".
+            if ($this->isGrantedTo($file, $identities, hideFailures: false)) {
+                return $this->accessMemo[$memoKey] = true;
             }
 
             $cursor = ($file->getParents() ?? [])[0] ?? null;
         }
 
-        return false;
+        return $this->accessMemo[$memoKey] = false;
     }
 
     /**
@@ -1316,7 +1436,11 @@ class DriveDocumentService
                 throw new \InvalidArgumentException('A property key cannot be empty.');
             }
 
-            $payload[(string) $key] = $value === null ? null : (string) $value;
+            // A plain null is dropped when the client serialises the body, so the key would
+            // stay on the file and the removal would be silent. The placeholder is what puts
+            // a JSON null on the wire — the same fix setExpiry() needed, applied in the second
+            // place it was needed and the place that was missed.
+            $payload[(string) $key] = $value === null ? GoogleModel::NULL_VALUE : (string) $value;
         }
 
         if ($payload === []) {
@@ -1387,32 +1511,39 @@ class DriveDocumentService
             return null;
         }
 
+        $memoKey = $fileId . '|' . implode(',', $identities);
+
+        if (array_key_exists($memoKey, $this->roleMemo)) {
+            return $this->roleMemo[$memoKey];
+        }
+
         $best   = null;
         $cursor = $fileId;
         $guard  = 0;
 
         while ($cursor !== null && $cursor !== $this->sharedDriveId && $guard++ < 25) {
-            try {
-                $file = $this->drive->files->get($cursor, [
-                    'supportsAllDrives' => true,
-                    'fields'            => 'id,parents,permissions(emailAddress,type,role)',
-                ]);
-            } catch (GoogleServiceException $e) {
-                if (in_array($e->getCode(), [403, 404], true)) {
-                    return $best;
-                }
+            $file = $this->walkFile($cursor);
 
-                throw $e;
+            if ($file === null) {
+                return $this->roleMemo[$memoKey] = $best;
             }
 
-            foreach ($this->grantsFor($file, $identities, true) as $role) {
+            foreach ($this->grantsFor($file, $identities, true, hideFailures: false) as $role) {
                 $best = $this->strongerRole($best, $role);
+            }
+
+            // Nothing above can beat the strongest role there is, so the rest of the chain cannot
+            // change the answer. Only owner qualifies: organizer looks like a ceiling on a Shared
+            // Drive but is not the top of the scale, and stopping there could report the weaker of
+            // two real roles.
+            if ($best === self::ROLE_STRENGTH[count(self::ROLE_STRENGTH) - 1]) {
+                return $this->roleMemo[$memoKey] = $best;
             }
 
             $cursor = ($file->getParents() ?? [])[0] ?? null;
         }
 
-        return $best;
+        return $this->roleMemo[$memoKey] = $best;
     }
 
     /**
@@ -1437,6 +1568,8 @@ class DriveDocumentService
     private function folderCriteria(?string $parentId): array
     {
         $this->assertConfigured();
+
+        $parentId = $this->normalizeParent($parentId);
 
         if ($parentId !== null) {
             $this->assertFileId($parentId);
@@ -1504,10 +1637,22 @@ class DriveDocumentService
         ];
     }
 
-    /** Backslashes and quotes, the two characters that can end a Drive query early. */
+    /**
+     * The three characters that can end a Drive query early.
+     *
+     * Backslash and quote are the obvious two. Per cent is the one that is easy to miss: the
+     * Google client URL-decodes every query parameter before re-encoding it
+     * (`Service/Resource.php`, `rawurlencode(rawurldecode($value))`), so a `%27` that arrived as
+     * six harmless characters reaches Drive as a bare quote and closes the string literal. Escaping
+     * the per cent sign first is what keeps it literal — and a per cent sign is ordinary text in a
+     * file name, so `50% off` still searches for `50% off`.
+     *
+     * Order matters only in that `%` goes first; the sequences the other two produce contain no
+     * per cent sign, so nothing is escaped twice.
+     */
     private function escapeQueryValue(string $value): string
     {
-        return str_replace(['\\', "'"], ['\\\\', "\\'"], $value);
+        return str_replace(['%', '\\', "'"], ['%25', '\\\\', "\\'"], $value);
     }
 
     /**
@@ -1581,17 +1726,18 @@ class DriveDocumentService
         $documents = [];
 
         foreach ($response->getFiles() as $file) {
-            if ($filter && !$this->isGrantedTo($file, $identities)) {
+            // A listing hides what it cannot check, which is documented — one unreachable
+            // lookup must not lose the whole page.
+            if ($filter && !$this->isGrantedTo($file, $identities, hideFailures: true)) {
                 continue;
             }
 
             $documents[] = $this->mapFile($file);
         }
 
-        // Google signals the end either by omitting the token or by sending an empty one.
-        $next = $response->getNextPageToken();
-
-        return new DrivePage($documents, $next !== null && $next !== '' ? $next : null);
+        // Google signals the end either by omitting the token or by sending an empty one, and
+        // treating '' as "there is more" is a thousand calls asking for the same first page.
+        return new DrivePage($documents, $response->getNextPageToken() ?: null);
     }
 
     private function createFile(string $title, string $mimeType, ?string $parentId): DriveDocument
@@ -1628,12 +1774,33 @@ class DriveDocumentService
      * Direct grants of an item. Shared Drives usually omit "permissions" from
      * files.list/get, so the dedicated permissions.list call is the reliable source.
      *
-     * @return array<string, string> normalised e-mail => strongest role held on the item
+     * Direct is the load-bearing word, and it is why `permissionDetails` is asked for. On a
+     * Shared Drive this call also returns the grants an item inherits from the folders above it,
+     * and keeping those under the item's own key made revoking on a folder a promise the cache
+     * could not keep: clearing the folder's entry cleared nothing the child would read, so the
+     * access outlived its revocation by up to the TTL. Each item now caches only what is granted
+     * on it, and the walk up the parents reads each ancestor's own entry — which is what
+     * forgetGrants() has always claimed.
+     *
+     * The cost is that a viewer whose grant sits on a folder is no longer answered by the child's
+     * entry; the walk goes up to the folder. Correct rather than cheap, and the ancestor's entry
+     * is cached too.
+     *
+     * @param bool $hideFailures true on a listing, where an unreachable lookup hides the item
+     *                            rather than losing the page; false for a single item, where a
+     *                            Google outage must not read as "not shared with you"
+     *
+     * @return array<string, string> normalised e-mail => strongest role granted on this item
      */
-    private function directGrants(string $fileId): array
+    private function directGrants(string $fileId, bool $hideFailures): array
     {
         if (isset($this->grantCache[$fileId])) {
             return $this->grantCache[$fileId];
+        }
+
+        // One failure on this path is enough: see $grantLookupUnavailable.
+        if ($hideFailures && $this->grantLookupUnavailable) {
+            return $this->grantCache[$fileId] = [];
         }
 
         // A zero TTL keeps the lookups out of the shared pool: an entry saved without a
@@ -1663,7 +1830,8 @@ class DriveDocumentService
 
                 $params = [
                     'supportsAllDrives' => true,
-                    'fields'            => 'nextPageToken, permissions(emailAddress,type,role,expirationTime)',
+                    'fields'            => 'nextPageToken, '
+                        . 'permissions(emailAddress,type,role,expirationTime,permissionDetails(inherited,inheritedFrom))',
                     'pageSize'          => 100,
                 ];
 
@@ -1676,6 +1844,15 @@ class DriveDocumentService
                 foreach ($response->getPermissions() as $permission) {
                     if (!in_array($permission->getType(), self::ALLOWED_TYPES, true)
                         || !$permission->getEmailAddress()) {
+                        continue;
+                    }
+
+                    // Inherited from a folder, so it belongs to that folder's entry and the walk
+                    // will read it there. Membership of the drive itself is kept: it is inherited
+                    // too, but the walk stops at the root without examining it, so dropping it
+                    // would lose the grant with nothing to replace it — and would make this
+                    // bundle stricter than Drive, hiding documents a member can simply open.
+                    if ($this->isInheritedFromFolder($permission)) {
                         continue;
                     }
 
@@ -1697,11 +1874,32 @@ class DriveDocumentService
                         ?? DrivePermission::ROLE_READER;
                 }
 
-                $pageToken = $response->getNextPageToken();
+                $pageToken = $response->getNextPageToken() ?: null;
             } while ($pageToken !== null);
-        } catch (\Exception) {
-            // Hide the item for this request only: a transient API error must not hide
-            // documents for the whole TTL. Errors (TypeError and friends) are bugs and propagate.
+        } catch (UnexpectedDriveStateException $e) {
+            // Our own signal that Drive is answering strangely. Its contract says map it to a 500,
+            // so turning it into "no access" here would contradict that wherever it happened.
+            throw $e;
+        } catch (\Exception $e) {
+            // Anything else means the lookup did not work — a Google error, an expired credential,
+            // a connection that never opened. Errors (TypeError and friends) are bugs and still
+            // propagate, since they are not caught here.
+            if (!$hideFailures) {
+                // A single item: the caller asked about this file, and answering "not shared with
+                // you" would turn an outage into a denial.
+                throw $e;
+            }
+
+            // Hidden, and only for this request: a cached empty entry would hide the document for
+            // the whole TTL. Recorded, because the alternative is a silent difference between
+            // "not shared" and "we could not find out".
+            $this->grantLookupUnavailable = true;
+
+            $this->logger?->warning(
+                'Google Drive sharing lookup failed; the item is hidden from this listing.',
+                ['fileId' => $fileId, 'code' => $e->getCode(), 'reason' => $e->getMessage()]
+            );
+
             return $this->grantCache[$fileId] = [];
         }
 
@@ -1723,9 +1921,9 @@ class DriveDocumentService
     /**
      * @param string[] $identities normalised e-mail plus the viewer group addresses
      */
-    private function isGrantedTo(DriveFile $file, array $identities): bool
+    private function isGrantedTo(DriveFile $file, array $identities, bool $hideFailures): bool
     {
-        return $this->grantsFor($file, $identities) !== [];
+        return $this->grantsFor($file, $identities, false, $hideFailures) !== [];
     }
 
     /**
@@ -1739,7 +1937,12 @@ class DriveDocumentService
      * @param string[] $identities normalised e-mail plus the viewer group addresses
      * @return list<string> one role per matching grant, unranked
      */
-    private function grantsFor(DriveFile $file, array $identities, bool $everyGrant = false): array
+    private function grantsFor(
+        DriveFile $file,
+        array $identities,
+        bool $everyGrant = false,
+        bool $hideFailures = false
+    ): array
     {
         if ($identities === []) {
             return [];
@@ -1747,18 +1950,30 @@ class DriveDocumentService
 
         $roles = [];
 
+        $now = time();
+
         foreach ($file->getPermissions() ?? [] as $permission) {
-            if (in_array($permission->getType(), self::ALLOWED_TYPES, true)
-                && in_array($this->normalizeEmail((string) $permission->getEmailAddress()), $identities, true)) {
-                $roles[] = $permission->getRole() ?? DrivePermission::ROLE_READER;
+            if (!in_array($permission->getType(), self::ALLOWED_TYPES, true)
+                || !in_array($this->normalizeEmail((string) $permission->getEmailAddress()), $identities, true)) {
+                continue;
             }
+
+            // The dedicated lookup has always skipped a grant whose time is up; the grants Google
+            // embeds in the file went unchecked, so an expired one still opened the item here.
+            $expires = $this->expiryTimestamp($permission->getExpirationTime());
+
+            if ($expires !== null && $expires <= $now) {
+                continue;
+            }
+
+            $roles[] = $permission->getRole() ?? DrivePermission::ROLE_READER;
         }
 
         if ($roles !== [] && !$everyGrant) {
             return $roles;
         }
 
-        foreach ($this->directGrants($file->getId()) as $email => $role) {
+        foreach ($this->directGrants($file->getId(), $hideFailures) as $email => $role) {
             if (in_array($email, $identities, true)) {
                 $roles[] = $role;
             }
@@ -1811,12 +2026,21 @@ class DriveDocumentService
     }
 
     /** Lower-case and collapse Gmail "+tag" aliases (Google treats them as the same account). */
+    /**
+     * The form two addresses can be compared in.
+     *
+     * The `+tag` suffix is folded away only for the domains Google itself ignores it on. Folding it
+     * everywhere made `alice+anything@corp.com` match a grant to `alice@corp.com` and the other way
+     * round, which is a way to be handed someone else's access on any domain that treats the tag as
+     * part of the address. Dots are left alone: Gmail ignores those too, but keeping them can only
+     * fail to match, never match too much.
+     */
     private function normalizeEmail(string $email): string
     {
         $email = strtolower(trim($email));
 
-        if (preg_match('/^([^+@]+)\+[^@]*(@.+)$/', $email, $m)) {
-            $email = $m[1] . $m[2];
+        if (preg_match('/^([^+@]+)\+[^@]*@(gmail\.com|googlemail\.com)$/', $email, $m)) {
+            $email = $m[1] . '@' . $m[2];
         }
 
         return $email;
@@ -1993,6 +2217,29 @@ class DriveDocumentService
         );
     }
 
+    /**
+     * Whether this grant lives on a folder above the item rather than on the item itself.
+     *
+     * Absent details mean a direct grant: Google omits the collection when there is nothing to
+     * say, and treating silence as inherited would hide grants that are real.
+     *
+     * Inheritance from the **drive** is not inheritance from a folder. Every member of a Shared
+     * Drive shows up on every item that way, and the walk up the parents stops at the root without
+     * reading it, so that grant has nowhere else to be found. Measured against Drive: a folder
+     * grant arrives on the child as inherited from the folder's id, and drive membership as
+     * inherited from the drive's id.
+     */
+    private function isInheritedFromFolder(GooglePermission $permission): bool
+    {
+        foreach ($permission->getPermissionDetails() ?? [] as $details) {
+            if ($details->getInherited() && $details->getInheritedFrom() !== $this->sharedDriveId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private function isGoogleDocument(?string $mimeType): bool
     {
         return $mimeType !== null && str_starts_with($mimeType, 'application/vnd.google-apps.');
@@ -2060,6 +2307,13 @@ class DriveDocumentService
     private function forgetGrants(string $fileId): void
     {
         unset($this->grantCache[$fileId]);
+
+        // The memos hold answers about whole chains, and a change here can change any of them —
+        // a grant on a folder decides every item below it. They are per-request and cheap to
+        // rebuild, so the whole lot goes rather than a guess at which ones are affected.
+        $this->accessMemo = [];
+        $this->roleMemo   = [];
+        $this->walkFiles  = [];
 
         $this->permissionCache?->deleteItem($this->cacheKey($fileId));
     }
@@ -2183,7 +2437,10 @@ class DriveDocumentService
                     ++$take;
                 }
 
-                $chunk = fread($handle, $take);
+                // stream_get_contents rather than fread: a stream wrapper may return less than
+                // asked for, and a short chunk that is not the last one is not a multiple of the
+                // 256 KiB Google requires, so the upload is rejected part-way through.
+                $chunk = stream_get_contents($handle, $take);
 
                 if ($chunk === false || $chunk === '') {
                     throw new UnexpectedDriveStateException(sprintf(

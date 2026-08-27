@@ -9,7 +9,11 @@ use Psr\Http\Message\StreamInterface;
 /**
  * A document rendered into a downloadable format.
  *
- * The bytes are not read into memory — `stream` is the live response body, so pipe
+ * A PSR-7 stream rather than a string, so it can be piped straight to a response. The body has
+ * already been received by then: the SDK's transport is not asked to stream, so Guzzle buffers into
+ * a `php://temp` handle, which stays in memory to about 2 MB and spills to disk past it. Memory is
+ * flat either way; the first byte simply arrives after the last one. `exportRevision()` fetches its
+ * link itself and does stream. Pipe
  * it straight to the client instead of buffering it:
  *
  *     $export = $drive->export($id, DriveExport::XLSX);
@@ -97,7 +101,9 @@ final class DriveExport
         return sprintf(
             '%s; filename="%s"; filename*=UTF-8\'\'%s',
             $disposition,
-            str_replace(['"', "\r", "\n"], '', $this->filename),
+            // The backslash goes too: left in, it escaped the closing quote and the header ended
+            // up unterminated. CR and LF were already removed, which is what keeps the header safe.
+            str_replace(['"', '\\', "\r", "\n"], '', $this->filename),
             rawurlencode($this->filename)
         );
     }

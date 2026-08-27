@@ -6,6 +6,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-27
+
+An external audit of 1.0.9 read all 6,039 lines, ran its findings as reproduction scripts against
+intercepted HTTP, and tried to refute the important ones. This is the whole of it: two security
+defects, nine of medium severity, eleven small ones, and the documentation that disagreed with the
+code. A minor rather than a patch because it adds configuration and a class, not because anything
+was taken away.
+
+### Security
+
+- **A percent-encoded quote broke out of the Drive query.** `escapeQueryValue()` escaped the
+  backslash and the quote, and the Google client URL-decodes every query parameter before
+  re-encoding it — so `%27` in a search term arrived at Drive as a bare quote and closed the string
+  literal. `search("zzz%27 or fullText contains %27password")` became a query with an extra clause.
+  The per cent sign is escaped first now, which keeps it literal; `50% off` still searches for
+  `50% off`.
+
+  Worse than the search case was the lookup: `findByAppProperty('orderId', $fromTheRequest)` could
+  be steered to a different file, so "the document for order 4711" returned whatever the caller
+  named instead. Ranges in `readMany()` travel through the same encoder and are escaped too, where
+  only correctness was at stake.
+
+  A viewer with filtering enabled could not reach anything they were not already allowed to see —
+  `isGrantedTo()` still applied per item — so this widened a query rather than crossing a boundary.
+  For `seesEverything()` and for server-side lookups it chose the file.
+
+- **Revoking on a folder left the child's cached answer in place.** On a Shared Drive, the sharing
+  list of a file also reports what it inherits from the folders above it, and those were cached
+  under the file's own key. Clearing the folder's entry cleared nothing the file would read, so the
+  revoked access went on working for up to the cache TTL. The README's promise that revocations
+  "clear the affected entry immediately" was false in exactly the case that matters.
+
+  Inherited grants are recognised now and left to the ancestor that grants them, which the walk
+  reads on its own — which is what `directGrants()`, and its name, always claimed.
+
+  Membership of the **drive** is deliberately not treated the same way. It arrives as inherited too,
+  but from the drive rather than from a folder, and the walk stops at the root without reading it;
+  dropping it would have hidden documents from people who can open them in Drive directly. Both
+  halves were measured against a real Shared Drive rather than reasoned about, and the second one
+  was a regression this release introduced and then caught.
+
+### Fixed
+
+- **Connection failures were never retried**, though the configuration and the README both said they
+  were. The curl error codes in the retry map could not fire: the SDK's task runner catches
+  `Google\Service\Exception` alone, and a connection that never opened arrives as a Guzzle exception
+  carrying no response, which the REST layer rethrows untouched. They are retried now by a
+  middleware one layer lower, where they actually appear, and the dead keys are gone. A response is
+  still left to the task runner, so the two ladders cannot stack.
+- **There was no HTTP timeout, and no way to set one.** Guzzle defaults to waiting for ever, so a
+  TCP session Google never answered held a worker until the process was killed. `http.timeout` and
+  `http.connect_timeout` are configurable and default to 30 and 10 seconds.
+- **A Google outage inside the sharing lookup answered "not shared with you".** For a single item
+  that turned an outage into a denial the caller could not tell from a real one; `canAccess()` and
+  `roleOf()` raise it now. A listing still hides what it cannot check, because losing one lookup
+  must not lose the page.
+- **A failing listing could sleep for hours.** Each item's lookup carries its own ladder of retries,
+  so a sustained 5xx was slept through once per item — minutes for a page, hours for a large one —
+  before returning an empty list anyway. The first failure now stands for the whole request.
+- **`setAppProperties($id, ['key' => null])` did not remove the key.** The client drops a plain null
+  when it serialises, so the removal never left the process. This is the same defect as `setExpiry()`
+  in 1.0.2, in the second place it applied and the place that was missed, and it slipped through for
+  the same reason: the test read the getter on the object it had just written to.
+- **The per-request sharing memo was never cleared**, which is only per-request under PHP-FPM. Under
+  FrankenPHP, RoadRunner, Swoole or a Messenger consumer it lived as long as the worker, outlasting
+  any TTL and outlasting it even with no pool configured. The service implements `ResetInterface` and
+  is tagged `kernel.reset`.
+- **A route parameter named after its argument resolved to a string.** The bundle registered its
+  resolver at the same priority as FrameworkBundle's own, and on a tie the framework's usually wins,
+  so `#[Route('/d/{document}')]` with a `DriveDocument $document` reached the controller as a
+  `TypeError` — the first of the two forms the README documents. The priority is above it now.
+- An empty `nextPageToken` ended the loop in two places and not in the other three. Where it did
+  not, an empty token read as "there is more" and asked for the same first page until the page
+  budget ran out.
+- Grants Google embeds in the file itself were counted without checking their expiry, while the
+  dedicated lookup had always skipped an expired one.
+- `+tag` in an address is folded away only on `gmail.com` and `googlemail.com`, the domains Google
+  ignores it on. Folding it everywhere let `alice+anything@corp.com` answer for `alice@corp.com` and
+  the other way round.
+- The drive id names the root and is reachable as one, as the README says. Asking about it directly
+  used to answer false and refuse every call that named it, while the same call with `null` worked.
+- An empty string counts as no parent everywhere a parent is taken. `?parentId=` arrives as `''`, and
+  the paths disagreed: creating fell back to the root but announced a parent of `''`, copying sent
+  Google `parents: ['']`, and listing refused it.
+- A resumable upload reads with `stream_get_contents()` rather than `fread()`. A stream wrapper may
+  return less than asked for, and a short chunk that is not the last one is not a multiple of the
+  256 KiB Google requires.
+- `InheritedPermissionException` keeps the original Drive error as its previous exception, as the
+  other translated exceptions already did.
+- A backslash in a file name no longer escapes the closing quote of the `Content-Disposition`
+  filename, which left the header unterminated.
+- `SheetRange` says what to do when a tab name parses as a cell reference: quote it.
+- The compiler pass for a missing cache pool notes it in the compiler log only. It also raised a
+  user warning, which an application with a throwing error handler turned into a failed
+  `cache:clear` — a hard failure for something meant to be a note.
+
+### Added
+
+- `http.timeout` and `http.connect_timeout` configuration.
+- An optional PSR-3 logger as the service's last constructor argument, used where a sharing failure
+  is deliberately hidden. Hiding a document because Google was briefly unavailable looks exactly
+  like the document not being shared, and nothing recorded the difference.
+- `RetryOnConnectionFailure`, the middleware behind the retry described above.
+- PHP 8.4 and 8.5 in the CI matrix, and static analysis on the lowest supported dependencies —
+  where it had been finding a real disagreement between an annotation and the runtime that the
+  matrix never ran.
+
+### Performance
+
+- The walk up the parents is read once per request instead of once per question. A controller three
+  folders deep asked for the same chain three times over — resolver, voter, action — for 13
+  `files.get` where 4 were needed. `roleOf()` also stops early once it has the strongest role there
+  is. Both are cleared by `reset()` and by any sharing change.
+
+### Documentation
+
+- `export()` returns a PSR-7 stream, and the body has already been received when you get it: the
+  SDK's transport is not asked to stream, so Guzzle buffers into `php://temp`. Memory stays flat and
+  spills to disk past 2 MB; the first byte simply arrives after the last one. The README said
+  "streamed, never buffered" in three places. `exportRevision()` does stream.
+- Which of the two layers retries what, since they are no longer the same one.
+- A range without a tab formats the spreadsheet's first tab while the values API writes to the first
+  **visible** one. They differ only when the first tab is hidden. Named rather than changed:
+  reconciling them means changing what `SheetTabIndex` returns, and that is public.
+- The unfinished sentence at the end of the 1.0.9 entry, and a docblock pointing at a method that
+  has never existed.
+
+### Testing
+
+- Requests are asserted at the transport now, not at the SDK boundary. Every existing test stubbed
+  `Files::listFiles($optParams)` and checked the `q` handed over there, which is one layer too early
+  to see a query the client rewrites on the way out — and it is the same blindness that let the wrong
+  `setExpiry()` fix pass in 1.0.2. Two tests that read a getter on an object they had just written to
+  were rewritten to read the request body.
+- 519 tests, up from 467, and the live suite covers the authorization boundary against real grants.
+
 ## [1.0.9] - 2026-08-26
 
 ### Changed
@@ -23,7 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a resumable upload over 5 MB, and the retry configuration read back. Byte-identical results, and
   the initializer runs exactly once. The client is the right thing to defer and `Drive` is not —
   `Google\Service`'s constructor only type-checks its argument, and the client has no public
-  properties, while `Drive` exposes its resources as twenty-two
+  properties, while `Drive` exposes its resources as twenty-two of them
 
 ### Fixed
 - The live test's changes-feed check had a shorter wait of its own than the two checks beside it,
@@ -644,7 +780,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.9...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.9...v1.1.0
 [1.0.9]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.6...v1.0.7

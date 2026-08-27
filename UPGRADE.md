@@ -6,6 +6,60 @@ deliberate constraint bump, and this file says what each one asked of you.
 
 From 1.0 onwards that changes — see [The promise from 1.0](#the-promise-from-10) at the end.
 
+## 1.0.x → 1.1.0
+
+`^1.0` picks this up on its own, and nothing was removed. But it corrects four behaviours, and two
+of them can change who reaches what — read those before deploying.
+
+### `+tag` is no longer folded away outside Gmail
+
+A grant is matched to a viewer by e-mail, and the `+tag` suffix used to be stripped on every domain.
+It is now stripped only on `gmail.com` and `googlemail.com`, which are the domains Google itself
+ignores it on.
+
+If your users sign in as `alice+something@your-domain.com` and the Drive grant is to
+`alice@your-domain.com`, that match no longer happens and they lose access. Grant the address they
+actually sign in with. The change is there because the old behaviour worked in both directions:
+`alice+intruder@your-domain.com` matched a grant to `alice@your-domain.com`.
+
+### A Google outage on a single item now raises instead of denying
+
+`canAccess()` and `roleOf()` used to answer "no" when the sharing lookup failed, which turned an
+outage into a denial the caller could not tell from a real one. They now let the
+`Google\Service\Exception` through.
+
+If you call either directly and treated `false` as "not shared", you may now see an exception where
+you saw a denial. Listings are unchanged: they still hide what they cannot check.
+
+### Sharing inherited from a folder is read from the folder
+
+Nothing to change, but the call pattern differs: a viewer whose grant sits on a folder is no longer
+answered by the child's cached entry, so the walk goes up to that folder. It is why revoking on a
+folder now takes effect immediately. The extra calls are more than paid back by the walk being read
+once per request instead of once per question.
+
+### The drive id and the empty string as a parent
+
+`canAccess($driveId)` answers `true` — the drive id names the root, as the README always said, and
+asking about it directly used to refuse every call that named it. An empty string now counts as no
+parent everywhere one is taken, rather than meaning something slightly different on each path.
+
+### New settings, all optional
+
+```yaml
+google_drive_docs:
+    http:
+        timeout: 30.0          # was: no limit at all
+        connect_timeout: 10.0
+```
+
+Both are new defaults rather than new options with the old behaviour: before this, a request with no
+answer waited for ever. Set either to `0` for that back.
+
+A PSR-3 logger can be passed as the service's last constructor argument, and it is worth doing — it
+is where you find out that a document was hidden from a listing because the sharing lookup failed
+rather than because it was not shared.
+
 ## 0.9.x → 1.0.0
 
 Three things to change, and only the first is likely to affect you.

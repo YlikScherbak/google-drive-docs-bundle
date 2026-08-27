@@ -90,7 +90,9 @@ final class DriveDocumentServicePropertiesTest extends TestCase
 
     public function testANullValueRemovesTheKey(): void
     {
-        // Drive deletes a property when its value arrives as null.
+        // Drive deletes a property when its value arrives as null — and this assertion used to
+        // read the getter on the object it had just written to, which agreed while the request
+        // body did not. The body is the only thing Drive sees.
         $payload = null;
         $this->files->method('update')->willReturnCallback(
             function (string $id, DriveFile $file) use (&$payload): DriveFile {
@@ -102,7 +104,14 @@ final class DriveDocumentServicePropertiesTest extends TestCase
 
         $this->service()->setAppProperties('doc', ['orderId' => null]);
 
-        self::assertSame(['orderId' => null], $payload->getAppProperties());
+        $wire = json_decode(
+            json_encode($payload->toSimpleObject(), JSON_THROW_ON_ERROR),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+
+        self::assertSame(['orderId' => null], $wire['appProperties']);
     }
 
     public function testNumbersAreSentAsStringsBecauseThatIsAllDriveStores(): void
@@ -236,6 +245,39 @@ final class DriveDocumentServicePropertiesTest extends TestCase
 
         self::assertTrue($page->hasMore());
         self::assertSame('TOKEN-2', $page->nextPageToken);
+    }
+
+    public function testRemovingAPropertySendsAJsonNullToDrive(): void
+    {
+        // The docblock promises that a null value removes the key, and the getter agreed while the
+        // body did not: the client drops a plain null when it serialises, so the key stayed on the
+        // file and the removal was silent. Asserting the getter is what let that through — the
+        // same trap that made a wrong setExpiry() fix look correct in 1.0.2.
+        $payload = null;
+        $this->files->method('update')->willReturnCallback(
+            function (string $fileId, DriveFile $body) use (&$payload): DriveFile {
+                $payload = $body;
+
+                return new DriveFile(['id' => $fileId]);
+            }
+        );
+
+        $this->service()->setAppProperties('doc-1', ['orderId' => '4711', 'obsolete' => null]);
+
+        $wire = json_decode(
+            json_encode($payload->toSimpleObject(), JSON_THROW_ON_ERROR),
+            true,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+
+        self::assertArrayHasKey(
+            'obsolete',
+            $wire['appProperties'],
+            'the key never left the process, so Drive was never asked to remove it'
+        );
+        self::assertNull($wire['appProperties']['obsolete']);
+        self::assertSame('4711', $wire['appProperties']['orderId']);
     }
 
     private function service(?ViewerContextInterface $context = null): DriveDocumentService

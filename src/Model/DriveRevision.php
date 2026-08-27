@@ -16,7 +16,8 @@ namespace Borsche\GoogleDriveDocsBundle\Model;
  *
  * And there is no way to make an old revision current again: Drive API v3 lists, reads, pins
  * and deletes revisions, but only the Google editor restores one in place. Recovering old
- * content therefore means writing it somewhere new — see `recoverRevision()`.
+ * content therefore means writing it somewhere new — export the revision and import it, or
+ * write the values back into the live document.
  */
 final class DriveRevision
 {
