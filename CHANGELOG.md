@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-08-28
+
 ### Fixed
 - The sharing lookup did not ask Drive for the `view` of a grant, so the metadata-only check in
   it could never fire — Drive fills in only the fields it is asked for. The downgraded grant on a
@@ -875,7 +877,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.9...v1.1.0
