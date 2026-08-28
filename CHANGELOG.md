@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-08-28
+
 ### Security
 
 - **A grant above a limited-access folder reached the documents inside it.** Drive can mark a folder
@@ -846,7 +848,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.9...v1.1.0
 [1.0.9]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.0.8...v1.0.9
