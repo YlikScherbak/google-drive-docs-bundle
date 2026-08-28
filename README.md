@@ -1285,13 +1285,20 @@ What is retried, and by which of the two layers that do it:
 - **Answers from Google** — HTTP **429**, **500**, **502**, **503**, **504**, and the Drive reasons
   `rateLimitExceeded`, `userRateLimitExceeded`, `backendError` and `internalError` (Drive reports
   quota problems behind a 403 with one of those). This is the SDK's own task runner.
-- **Connections that never opened** — DNS, connect, timeout, TLS handshake, empty reply. These are
+- **Connection-level failures** — DNS, connect, TLS handshake, timeout, empty reply. These are
   retried by a middleware this bundle adds, because the task runner cannot see them: it catches
   `Google\Service\Exception` alone, and a connection failure arrives as a Guzzle exception carrying
   no response. Curl error codes used to sit in the retry map for this and never fired.
 
-The two cannot stack: a response is handled by the first and an exception by the second, and the
-same failure is never both.
+  Not all of them mean the same thing, and the difference decides whether repeating is safe. DNS,
+  connect and TLS happen **before** the request could be sent, so those are retried whatever the
+  method is. A timeout or an empty reply can happen **after** Drive has already acted — a row
+  appended and the answer lost on the way back — so those are repeated only for requests with no
+  side effects (`GET`, `HEAD`, `OPTIONS`, `TRACE`). A `POST` or a `PATCH` that may have been applied
+  reaches you as a failure instead, because a duplicated row is worse than an error you can see.
+
+The two layers cannot stack: a response is handled by the first and an exception by the second, and
+the same failure is never both.
 
 What is **not** retried, on purpose: 400, 401, 403 without a rate-limit reason, and 404.
 Repeating those cannot change the answer and only burns quota.

@@ -1,0 +1,129 @@
+name: Release
+
+# The tag is created here, after everything has passed, and nowhere else.
+#
+# Twice a release went out with a red build behind it, because tagging and checking were separate
+# acts and the tag went first: 1.1.0 shipped with static analysis failing on the lowest supported
+# dependencies, and 1.1.2 shipped calling a method those dependencies do not have — every
+# canAccess() fatal for anyone on an older SDK. Both were caught by checks that had no way to stop
+# the release. This gives them one.
+#
+# Run it from the Actions tab with the version to release. It refuses a version that has no section
+# in the changelog and a tag that already exists, runs the whole of CI, and only then tags and
+# publishes — taking the release notes from the changelog, so the two cannot drift apart.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the v — for example 1.1.4'
+        required: true
+        type: string
+      title:
+        description: 'Release title. Defaults to the version on its own.'
+        required: false
+        type: string
+      live:
+        description: 'Include the live smoke test against the real Shared Drive in the gate'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Run every check and print the notes, but tag nothing'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything CI runs on a push, plus the live test when asked for. Nothing below starts until
+  # this is green, which is the entire point of the file.
+  gate:
+    name: Gate
+    uses: ./.github/workflows/ci.yml
+    with:
+      live: ${{ inputs.live }}
+    secrets: inherit
+
+  release:
+    name: Tag and publish
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the version is not already released
+        run: |
+          git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1 || exit 0
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            # A rehearsal against a version that shipped is the ordinary way to rehearse: it is
+            # the only kind that has a changelog section to read.
+            echo "::notice::v${{ inputs.version }} already exists. Carrying on because this is a"
+            echo "::notice::dry run; a real one would stop here."
+            exit 0
+          fi
+
+          echo "::error::v${{ inputs.version }} already exists. Releasing over a tag people may"
+          echo "::error::already have is worse than any reason to reuse the number."
+          exit 1
+
+      - name: Take the release notes from the changelog
+        id: notes
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          # Everything between this version's heading and the next one. A version with no section
+          # is almost always a version nobody meant to release.
+          awk -v version="## [$VERSION]" '
+            index($0, version) == 1 { inside = 1; next }
+            inside && /^## \[/      { exit }
+            inside                  { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for $VERSION. Stamp it before releasing:"
+            echo "::error::the notes people read come from there, not from a message typed here."
+            exit 1
+          fi
+
+          echo "Release notes for $VERSION:"
+          cat release-notes.md
+
+      - name: Stop here if this is a rehearsal
+        if: inputs.dry_run
+        run: |
+          echo "::notice::Dry run: everything passed and the notes above are what would be"
+          echo "::notice::published. Nothing was tagged. Run it again with dry_run off to release."
+
+      - name: Tag it
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git tag -a "v${{ inputs.version }}" -m "v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
+
+      - name: Publish the release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="${{ inputs.title }}"
+          [ -n "$TITLE" ] || TITLE="v${{ inputs.version }}"
+
+          gh release create "v${{ inputs.version }}" \
+            --title "$TITLE" \
+            --notes-file release-notes.md
+
+      - name: Say where it went
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "::notice::v${{ inputs.version }} is tagged and published, and every check passed first."
+          echo "::notice::Packagist picks it up from the webhook; give it a minute."

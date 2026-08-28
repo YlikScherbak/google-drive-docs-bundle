@@ -4,9 +4,30 @@ on:
   push:
     branches: [ main ]
   pull_request:
-  # The live smoke test is manual on purpose: it writes to a real Shared Drive and spends
-  # Google quota, so it runs when someone asks for it rather than on every push.
+
+  # The live smoke test writes to a real Shared Drive and spends Google quota, so it never runs on
+  # a push. It runs when asked for, and once a week as a canary: this bundle leans on behaviour
+  # Google documents thinly or not at all — which pairings of item and role may carry an expiry,
+  # what a limited-access folder reports, how long an index takes to catch up — and a weekly run is
+  # how that turns into a build failure rather than into someone's bug report.
+  schedule:
+    - cron: '17 6 * * 1'
+
   workflow_dispatch:
+    inputs:
+      live:
+        description: 'Also run the live smoke test against the real Shared Drive'
+        required: false
+        type: boolean
+        default: false
+
+  # Called by the release workflow, which will not tag anything until all of this is green.
+  workflow_call:
+    inputs:
+      live:
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -90,15 +111,18 @@ jobs:
       - name: Install dependencies
         run: composer install --prefer-dist --no-progress --no-interaction
 
+      # Cheap, and the kind of thing that is embarrassing to discover from Packagist.
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-publish
+
       # 128M is not enough for this codebase: the worker dies rather than reporting.
       - name: Run PHPStan
         run: vendor/bin/phpstan analyse --no-progress --memory-limit=1G
 
   live-smoke-test:
     name: Live smoke test (real Shared Drive)
-    # Manual only, and it needs the four credentials as repository secrets. Without them the
-    # script refuses cleanly and the job reports why rather than failing on a stack trace.
-    if: github.event_name == 'workflow_dispatch'
+    # Weekly, or when a run asks for it. Never on a push: it writes to a real drive.
+    if: github.event_name == 'schedule' || inputs.live
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,17 +138,31 @@ jobs:
         run: composer install --prefer-dist --no-progress --no-interaction
 
       - name: Check the credentials are configured
+        id: credentials
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
         run: |
-          if [ -z "$GOOGLE_CLIENT_ID" ]; then
-            echo "::warning::No GOOGLE_CLIENT_ID secret is set, so there is no drive to talk to."
-            echo "Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_SHARED_DRIVE_ID and"
-            echo "GOOGLE_OAUTH_REFRESH_TOKEN as repository secrets to run this."
-            exit 1
+          if [ -n "$GOOGLE_CLIENT_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::No GOOGLE_CLIENT_ID secret is set, so there is no drive to talk to."
+          echo "Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_SHARED_DRIVE_ID and"
+          echo "GOOGLE_OAUTH_REFRESH_TOKEN as repository secrets to run this."
+
+          # A weekly run on a fork that never configured the secrets is a repository which has not
+          # opted in, not a failure. Asking for the run and not having them is a mistake worth
+          # hearing about.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            exit 0
+          fi
+
+          exit 1
+
       - name: Run it
+        if: steps.credentials.outputs.configured == 'true'
         env:
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}

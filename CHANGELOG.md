@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A release workflow that tags only after everything has passed.** Two releases went out with a
+  red build behind them, because tagging and checking were separate acts and the tag went first:
+  1.1.0 with static analysis failing on the lowest supported dependencies, and 1.1.2 calling a
+  method those dependencies do not have — every `canAccess()` fatal for anyone on an older SDK.
+  Both were caught by checks that had no way to stop the release. Now the tag is created inside the
+  run that verifies it, and nowhere else: the whole of CI, then a check that the version has a
+  changelog section and no existing tag, then the tag and the release, with the notes taken from
+  the changelog so the two cannot drift. It has a dry run, which is how the gate itself was checked.
+- **The live smoke test runs weekly**, not only when asked. This bundle leans on behaviour Google
+  documents thinly or not at all — which pairings of item and role may carry an expiry, what a
+  limited-access folder reports, how long an index takes to catch up — and a weekly run is how a
+  change in any of that becomes a build failure rather than somebody's bug report. A scheduled run
+  on a repository that never configured the credentials says so and stops, rather than failing.
+- `composer validate --strict` in the static-analysis job.
+
+### Documentation
+- The retry section said connection-level failures were "connections that never opened", which is
+  the assumption 1.1.2 corrected in the code and left standing in the prose. It now says which are
+  known to have happened before the request was sent and are retried for any method, and which are
+  ambiguous — a timeout, an empty reply — and repeated only where repeating has no second effect.
+- `folderCriteria()` said everything inside a reachable folder is visible, which limited-access
+  folders ended. The behaviour is right and unchanged: an ordinary child needs no separate walk, a
+  limited-access child stays in the listing as a node that cannot be opened, and opening it is its
+  own decision. The comment says that now, in the same terms the README uses.
+
 ## [1.1.3] - 2026-08-28
 
 ### Fixed

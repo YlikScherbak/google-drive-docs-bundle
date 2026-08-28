@@ -1639,9 +1639,15 @@ class DriveDocumentService implements ResetInterface
     /**
      * The query and filtering flag for a folder listing.
      *
-     * Entering a folder is an all-or-nothing decision: once access to the folder itself
-     * is proven, everything inside is visible (Google inherits sharing), so per-item
-     * filtering can be switched off for the rest of the listing.
+     * Once the folder itself is reachable, its ordinary children are reachable through it, so they
+     * need no separate walk and per-item filtering is switched off for the listing.
+     *
+     * A limited-access child folder is the exception, and it is why this says "ordinary". Google
+     * may still show such a folder to someone who cannot open it — a node they can see and not
+     * enter — and the listing keeps it, because hiding it would be stricter than Drive. Entering it
+     * is a separate decision: `listFolder()` on that folder asserts access first, and the walk
+     * stops at its boundary. Nothing inside it is listed by this call, which returns direct
+     * children alone.
      *
      * @return array{0: string, 1: bool}
      */
