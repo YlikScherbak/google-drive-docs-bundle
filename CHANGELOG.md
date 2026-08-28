@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The limited-access boundary read its two fields through generated getters that the oldest
+  `google/apiclient-services` this package allows does not have, so every test errored there and
+  1.1.2 went out with that CI job red. Both fields are read from the model itself now, which works
+  on any version: Google returns them regardless, and the model keeps every key it is given.
+
+  Raising the dependency floor was the other option and the wrong one — it would force an upgrade
+  for a security fix that does not need one, and leave anyone who could not upgrade with no boundary
+  at all. Checked by installing the lowest dependencies and running the suite and the analysis
+  against them, where the getter is genuinely absent.
+
 ## [1.1.2] - 2026-08-28
 
 ### Security

@@ -1374,7 +1374,7 @@ class DriveDocumentService implements ResetInterface
             // rule is that only its direct grants, and those of an owner or organizer, reach what is
             // inside it. Walking past it would carry a grant from above across a boundary Drive
             // draws deliberately — the folder is "limited access" in the Drive interface.
-            if ($cursor->getInheritedPermissionsDisabled() === true) {
+            if (self::rawField($cursor, 'inheritedPermissionsDisabled') === true) {
                 return $this->remember($memoKey, false);
             }
 
@@ -1608,7 +1608,7 @@ class DriveDocumentService implements ResetInterface
 
             // The same boundary reachableBy() stops at, for the same reason: a role held on a
             // folder above a limited-access one is not held on what is inside it.
-            if ($file->getInheritedPermissionsDisabled() === true) {
+            if (self::rawField($file, 'inheritedPermissionsDisabled') === true) {
                 return $this->roleMemo[$memoKey] = $best;
             }
 
@@ -1948,7 +1948,7 @@ class DriveDocumentService implements ResetInterface
                     }
 
                     // Sees that it exists, cannot open it. See grantsFor().
-                    if ($permission->getView() === self::VIEW_METADATA) {
+                    if (self::rawField($permission, 'view') === self::VIEW_METADATA) {
                         continue;
                     }
 
@@ -2049,7 +2049,7 @@ class DriveDocumentService implements ResetInterface
             // A metadata-only grant lets someone see that an item exists, not open it. Google
             // produces these on the folders it limits: an inherited grant on such a folder comes
             // back downgraded to reader with view=metadata, measured against a real drive.
-            if ($permission->getView() === self::VIEW_METADATA) {
+            if (self::rawField($permission, 'view') === self::VIEW_METADATA) {
                 continue;
             }
 
@@ -2325,6 +2325,23 @@ class DriveDocumentService implements ResetInterface
         }
 
         return false;
+    }
+
+    /**
+     * A field the installed google/apiclient-services may be too old to have a getter for.
+     *
+     * Both of the fields the limited-access boundary turns on — `inheritedPermissionsDisabled` on a
+     * file and `view` on a permission — were added to the generated models after the oldest version
+     * this package allows. Google returns them anyway, and the model keeps every key it was given,
+     * so reading them this way works on any version: the declared property on a recent one, the
+     * model's own magic access on an older one.
+     *
+     * Raising the dependency floor instead would have forced an upgrade for a security fix that does
+     * not need one — and would have left anyone who could not upgrade with no boundary at all.
+     */
+    private static function rawField(GoogleModel $model, string $name): mixed
+    {
+        return $model->{$name} ?? null;
     }
 
     private function isGoogleDocument(?string $mimeType): bool
