@@ -1913,8 +1913,11 @@ class DriveDocumentService implements ResetInterface
 
                 $params = [
                     'supportsAllDrives' => true,
+                    // view is what tells a metadata-only grant from one that opens the item;
+                    // Drive fills in only what is asked for, so leaving it out here would turn the
+                    // check below into a check on nothing.
                     'fields'            => 'nextPageToken, '
-                        . 'permissions(emailAddress,type,role,expirationTime,permissionDetails(inherited,inheritedFrom))',
+                        . 'permissions(emailAddress,type,role,expirationTime,view,permissionDetails(inherited,inheritedFrom))',
                     'pageSize'          => 100,
                 ];
 

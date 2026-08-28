@@ -1262,6 +1262,11 @@ is about a file.
   offer a way to set the flag: turning it on is a decision about a folder's meaning, and Drive's own
   interface is the better place for it. What the bundle does is honour it.
 
+  One place where it is stricter than Drive: Google lets an `organizer` or `owner` from above
+  through the boundary, and the bundle does not — the walk stops for every role. Those roles come
+  from the drive's own membership, which the walk never reads anyway, so in practice the two agree;
+  where they would not, the bundle refuses, which is the safe side to be wrong on.
+
   A metadata-only grant is not treated as access here. If you want to show such a folder in a tree
   as a locked node, that is a different question from the one `canAccess()` answers, and it needs
   `listFolder()` on the parent rather than an access check on the folder.

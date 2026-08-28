@@ -7,6 +7,7 @@ namespace Borsche\GoogleDriveDocsBundle\Tests\Service;
 use Borsche\GoogleDriveDocsBundle\Contract\AllowAllViewerContext;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
+use Borsche\GoogleDriveDocsBundle\Tests\FakeViewerContext;
 use Google\Client;
 use Google\Service\Drive;
 use Google\Service\Sheets;
@@ -93,6 +94,49 @@ final class DriveQueryOnTheWireTest extends TestCase
             self::DRIVE_ID,
             ['application/vnd.google-apps.spreadsheet']
         );
+    }
+
+    /**
+     * The `fields` mask of the request that left, split into the names Drive will fill in.
+     *
+     * @return list<string>
+     */
+    private function sentFields(int $index): array
+    {
+        self::assertArrayHasKey($index, $this->history, 'no request reached the transport');
+
+        parse_str($this->history[$index]['request']->getUri()->getQuery(), $parsed);
+
+        self::assertIsString($parsed['fields'] ?? null, 'the request carried no fields mask');
+
+        return preg_split('/[\s,()]+/', $parsed['fields'], -1, PREG_SPLIT_NO_EMPTY) ?: [];
+    }
+
+    public function testTheSharingLookupAsksDriveForTheViewOfEveryGrant(): void
+    {
+        // A metadata-only grant is refused on the strength of its `view`, and Drive only sends
+        // the fields it was asked for: a check on a field the mask leaves out is a check on
+        // nothing. The item's own permissions come back empty here, which is what a Shared
+        // Drive usually does, so the second request is the dedicated permissions.list.
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], '{"id": "doc", "parents": ["' . self::DRIVE_ID . '"]}'),
+            new Response(200, ['Content-Type' => 'application/json'], '{"permissions": []}'),
+        ]));
+        $stack->push(Middleware::history($this->history));
+        $client = new Client();
+        $client->setHttpClient(new GuzzleClient(['handler' => $stack]));
+
+        $service = new DriveDocumentService(
+            new Drive($client),
+            new FakeViewerContext('viewer@example.com', false),
+            self::DRIVE_ID,
+            ['application/vnd.google-apps.spreadsheet']
+        );
+
+        self::assertFalse($service->canAccess('doc'));
+        self::assertStringContainsString('permissions', $this->history[1]['request']->getUri()->getPath());
+        self::assertContains('view', $this->sentFields(1), 'permissions.list must ask for view, or the metadata check below it is dead');
+        self::assertContains('view', $this->sentFields(0), 'files.get must ask for view too');
     }
 
     public function testAPercentEncodedQuoteCannotCloseTheStringLiteral(): void

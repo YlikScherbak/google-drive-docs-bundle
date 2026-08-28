@@ -53,7 +53,9 @@ final class RetryOnConnectionFailure
      *
      * PUT and DELETE are idempotent by the specification and could arguably join them, but only
      * arguably: what this bundle sends as PUT is a resumable upload chunk, and the value of getting
-     * one more attempt there does not outweigh reasoning about a half-written upload.
+     * one more attempt there does not outweigh reasoning about a half-written upload. PATCH is not
+     * even arguable — it is what Drive uses for every update, and a partial update applied twice is
+     * not the same as once wherever a value depends on the current one.
      */
     private const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS', 'TRACE'];
 

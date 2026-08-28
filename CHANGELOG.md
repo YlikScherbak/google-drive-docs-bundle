@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The sharing lookup did not ask Drive for the `view` of a grant, so the metadata-only check in
+  it could never fire — Drive fills in only the fields it is asked for. The downgraded grant on a
+  limited-access folder was still refused, because Drive also marks it inherited and that mark was
+  read; but the second line of defence the 1.1.2 entry describes was a check on a field that never
+  arrived. It is asked for now, and a test asserts the mask on the request that leaves the process
+  rather than the argument handed to the SDK — the same lesson as 1.1.0's query tests
+- The boundary and the metadata refusal are now also tested against models that declare neither
+  field, the way the oldest `google/apiclient-services` this package allows builds them, so the
+  reading path the lowest-dependencies CI job exercises is exercised by the ordinary suite too
 - The limited-access boundary read its two fields through generated getters that the oldest
   `google/apiclient-services` this package allows does not have, so every test errored there and
   1.1.2 went out with that CI job red. Both fields are read from the model itself now, which works
@@ -16,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a security fix that does not need one, and leave anyone who could not upgrade with no boundary
   at all. Checked by installing the lowest dependencies and running the suite and the analysis
   against them, where the getter is genuinely absent.
+
+### Documentation
+- The boundary is stricter than Drive in one respect: Google lets an `organizer` or `owner` from
+  above a limited-access folder through it, and the walk stops for every role. Said where the
+  setting is explained, with why the two agree in practice
+- Why `PATCH` is not among the methods the connection-failure retry repeats, next to the note on
+  `PUT` and `DELETE`
 
 ## [1.1.2] - 2026-08-28
 

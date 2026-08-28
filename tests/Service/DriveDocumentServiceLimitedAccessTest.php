@@ -11,6 +11,7 @@ use Google\Service\Drive;
 use Google\Service\Drive\DriveFile;
 use Google\Service\Drive\Permission as GooglePermission;
 use Google\Service\Drive\PermissionList;
+use Google\Service\Drive\PermissionPermissionDetails;
 use Google\Service\Drive\Resource\Files;
 use Google\Service\Drive\Resource\Permissions;
 use PHPUnit\Framework\MockObject\MockObject;
@@ -92,6 +93,48 @@ final class DriveDocumentServiceLimitedAccessTest extends TestCase
         self::assertFalse($this->service()->canAccess('limited'));
     }
 
+    public function testAMetadataOnlyGrantIsRefusedEvenWhenDriveOmitsItsOrigin(): void
+    {
+        // The downgraded grant is normally also marked inherited, and that mark is what used to
+        // catch it. `view` has to catch it on its own: Drive does not owe permissionDetails on
+        // every answer, and a check that depends on a second field is not a second line of defence.
+        $this->permissions = $this->createMock(Permissions::class);
+        $this->permissions->method('listPermissions')->willReturnCallback(
+            fn (string $id): PermissionList => $id === 'limited'
+                ? $this->grant('reader', view: 'metadata')
+                : new PermissionList()
+        );
+
+        self::assertFalse($this->service()->canAccess('limited'));
+        self::assertNull($this->service()->roleOf('limited'));
+    }
+
+    public function testTheBoundaryIsReadOffAModelThatHasNoGetterForIt(): void
+    {
+        // The oldest google/apiclient-services this package allows predates both fields, so its
+        // models keep them as loose data rather than declared properties. This is that model:
+        // nothing declared, everything in the bag the SDK keeps for unknown keys.
+        $this->files = $this->createMock(Files::class);
+        $this->files->method('get')->willReturnCallback(
+            static fn (string $id): DriveFile => match ($id) {
+                'secret'  => new DriveFile(['id' => 'secret', 'parents' => ['limited']]),
+                'limited' => self::withoutGetters(['id' => 'limited', 'parents' => ['outer'], 'inheritedPermissionsDisabled' => true]),
+                default   => new DriveFile(['id' => 'outer', 'parents' => [self::DRIVE_ID]]),
+            }
+        );
+        $this->permissions = $this->createMock(Permissions::class);
+        $this->permissions->method('listPermissions')->willReturnCallback(
+            fn (string $id): PermissionList => match ($id) {
+                'limited' => $this->grantWithoutGetters('reader', view: 'metadata'),
+                'outer'   => $this->grant('writer'),
+                default   => new PermissionList(),
+            }
+        );
+
+        self::assertFalse($this->service()->canAccess('secret'), 'the boundary must hold with no getter to read it through');
+        self::assertFalse($this->service()->canAccess('limited'), 'so must the metadata refusal');
+    }
+
     public function testADirectGrantInsideTheBoundaryStillWorks(): void
     {
         // What limited access is for: share the folder itself with the people who should have it.
@@ -117,6 +160,56 @@ final class DriveDocumentServiceLimitedAccessTest extends TestCase
             self::DRIVE_ID,
             ['application/vnd.google-apps.spreadsheet']
         );
+    }
+
+    /**
+     * A DriveFile as an SDK too old to declare the limited-access field would build it: the key
+     * is not a property but lives in the bag Google\Model keeps for the keys it does not know,
+     * reachable only through the model's own magic.
+     *
+     * @param array<string, mixed> $data
+     */
+    private static function withoutGetters(array $data): DriveFile
+    {
+        $file = new class () extends DriveFile {
+            public function keepInTheBagOnly(string $key, mixed $value): void
+            {
+                // Forget the declared property, so isset() and reads fall through to the bag.
+                unset($this->{$key});
+                $this->modelData[$key] = $value;
+            }
+        };
+
+        foreach ($data as $key => $value) {
+            if ($key === 'inheritedPermissionsDisabled') {
+                $file->keepInTheBagOnly($key, $value);
+            } else {
+                $file->{$key} = $value;
+            }
+        }
+
+        return $file;
+    }
+
+    private function grantWithoutGetters(string $role, string $view): PermissionList
+    {
+        $permission = new class () extends GooglePermission {
+            public function keepInTheBagOnly(string $key, mixed $value): void
+            {
+                unset($this->{$key});
+                $this->modelData[$key] = $value;
+            }
+        };
+        $permission->emailAddress      = 'viewer@example.com';
+        $permission->type              = DrivePermission::TYPE_USER;
+        $permission->role              = $role;
+        $permission->permissionDetails = [new PermissionPermissionDetails(['inherited' => false])];
+        $permission->keepInTheBagOnly('view', $view);
+
+        $list = new PermissionList();
+        $list->setPermissions([$permission]);
+
+        return $list;
     }
 
     private function grant(string $role, ?string $inheritedFrom = null, ?string $view = null): PermissionList

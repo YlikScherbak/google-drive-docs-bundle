@@ -124,7 +124,7 @@ final class DriveDocumentServiceListingAgreementTest extends TestCase
         );
 
         self::assertCount(3, $this->service()->search('invoice'));
-        self::assertSame(1, $folderLookups, 'the shared folder was read once per item');
+        self::assertSame(1, $folderLookups, 'the shared folder was read once for the page, not once per item');
     }
 
     private function service(string $viewer = 'viewer@example.com'): DriveDocumentService
