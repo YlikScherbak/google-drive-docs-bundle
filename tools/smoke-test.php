@@ -219,6 +219,10 @@ $client = (new GoogleClientFactory(
     $env['GOOGLE_OAUTH_REFRESH_TOKEN']
 ))->create();
 
+// The limited-access check needs a field the bundle does not expose, so it reaches for the raw
+// service. Everything else in this file goes through the bundle.
+$GLOBALS['smokeClient'] = $client;
+
 $viewer = new SmokeViewer();
 // text/plain is here so the trash check can use the imported file: listTrash() filters by
 // document_mime_types, and a type left out of it is excluded from the listing by design.
@@ -775,6 +779,75 @@ try {
                 // assertions above are trying to report.
                 try {
                     $drive->revoke($sheetId, $grant->id);
+                } catch (Throwable) {
+                }
+            }
+
+            return null;
+        });
+    }
+
+    // ------------------------------------------------------------ limited access
+    echo "\nLimited-access folders\n";
+
+    if ($secondEmail === null) {
+        skip('a grant above a limited-access folder does not reach inside it', 'needs SMOKE_SECOND_EMAIL');
+    } else {
+        check('a grant above a limited-access folder does not reach inside it', static function () use ($drive, $viewer, $folderId, $secondEmail, $stamp) {
+            // Drive can mark a folder so that permissions from above do not reach it — "limited
+            // access" in its interface, inheritedPermissionsDisabled over the API. Google does not
+            // report the outer grant on the file inside; it downgrades it on the folder itself to a
+            // metadata-only reader. So the way to walk past the boundary is to keep climbing, and
+            // the way not to is to stop there.
+            $raw   = new Drive($GLOBALS['smokeClient']);
+            $outer = $drive->createFolder(PREFIX . 'outer_' . $stamp, $folderId);
+            born($outer->id, 'outer folder ' . $outer->name);
+
+            $limited = $drive->createFolder(PREFIX . 'limited_' . $stamp, $outer->id);
+            born($limited->id, 'limited folder ' . $limited->name);
+
+            $secret = $drive->createDocument(PREFIX . 'secret_' . $stamp, $limited->id, MIME_SPREADSHEET);
+            born($secret->id, 'secret ' . $secret->name);
+
+            // Writer on the OUTER folder, and nothing anywhere below it.
+            $grant = $drive->grant($outer->id, $secondEmail, 'writer');
+
+            $raw->files->update($limited->id, new Drive\DriveFile(['inheritedPermissionsDisabled' => true]), [
+                'supportsAllDrives' => true,
+                'fields'            => 'id,inheritedPermissionsDisabled',
+            ]);
+
+            $viewer->everything = false;
+            $viewer->email      = $secondEmail;
+
+            try {
+                assertTrue(
+                    $drive->canAccess($outer->id),
+                    'the grant on the outer folder should still work on the outer folder'
+                );
+                assertTrue(
+                    !$drive->canAccess($secret->id),
+                    'a grant above a limited-access folder reached the document inside it'
+                );
+                assertTrue(
+                    $drive->roleOf($secret->id) === null,
+                    'roleOf reported ' . var_export($drive->roleOf($secret->id), true) . ' inside a limited folder'
+                );
+
+                $manager = new AccessDecisionManager([new DriveVoter($drive, $viewer)]);
+
+                foreach ([DriveVoter::VIEW, DriveVoter::EDIT, DriveVoter::SHARE, DriveVoter::DELETE] as $attribute) {
+                    assertTrue(
+                        !$manager->decide(new NullToken(), [$attribute], $secret->id),
+                        sprintf('the voter granted %s inside a limited-access folder', $attribute)
+                    );
+                }
+            } finally {
+                $viewer->everything = true;
+                $viewer->email      = null;
+
+                try {
+                    $drive->revoke($outer->id, $grant->id);
                 } catch (Throwable) {
                 }
             }

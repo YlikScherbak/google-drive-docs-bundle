@@ -109,6 +109,16 @@ class DriveDocumentService implements ResetInterface
         . 'contentRestrictions(readOnly,reason),'
         . self::CAPABILITY_FIELDS;
 
+    /**
+     * The value Drive puts on a grant that reveals an item without opening it.
+     *
+     * It appears on the folders Google limits: with `inheritedPermissionsDisabled` set, a grant
+     * inherited from above arrives on that folder downgraded to `reader` with this view, so the
+     * holder finds the folder in their tree and gets no further. Treating it as access would read
+     * that downgrade as permission.
+     */
+    private const VIEW_METADATA = 'metadata';
+
     /** Items per page when the caller does not say otherwise. */
     public const DEFAULT_PAGE_SIZE = 100;
 
@@ -308,6 +318,9 @@ class DriveDocumentService implements ResetInterface
             $this->permissionCacheTtl,
             $this->maxUploadBytes,
             $this->chunkBytes,
+            // Carried over like everything else: without it a clone stops reporting the sharing
+            // lookups it hides, which is the one thing here nothing else records.
+            $this->logger,
         );
     }
 
@@ -1296,7 +1309,11 @@ class DriveDocumentService implements ResetInterface
                 'supportsAllDrives' => true,
                 // expirationTime because the grants Google embeds in a file are checked here too,
                 // and an expired one opened nothing anywhere else.
-                'fields'            => 'id,parents,permissions(emailAddress,type,role,expirationTime)',
+                // inheritedPermissionsDisabled marks a folder that grants above it do not reach,
+                // and view tells a metadata-only grant from one that opens the item. Both decide
+                // access, so both have to be asked for.
+                'fields'            => 'id,parents,inheritedPermissionsDisabled,'
+                    . 'permissions(emailAddress,type,role,expirationTime,view)',
             ]);
         } catch (GoogleServiceException $e) {
             if (in_array($e->getCode(), [403, 404], true)) {
@@ -1318,6 +1335,79 @@ class DriveDocumentService implements ResetInterface
     private function normalizeParent(?string $parentId): ?string
     {
         return $parentId === '' ? null : $parentId;
+    }
+
+    /**
+     * Whether any of these identities reaches this item, on it or on a folder above it.
+     *
+     * The one place that answers this question, so that a listing and canAccess() cannot disagree.
+     * They used to: canAccess() walked the parents while a filtered listing asked only about the
+     * item, which was the same answer until inherited grants stopped being cached under the child —
+     * after which a document shared through its folder was reachable and yet absent from every
+     * search, and from the trash listing, and from a lookup by application property.
+     *
+     * Takes the file rather than its id because the caller usually has it already: a listing has
+     * just received it with its parents and its grants, and re-fetching it per item would be one
+     * call each for nothing.
+     *
+     * @param string[] $identities
+     * @param bool     $hideFailures see directGrants(): true on a listing, false for a single item
+     */
+    private function reachableBy(DriveFile $file, array $identities, bool $hideFailures): bool
+    {
+        $fileId  = (string) $file->getId();
+        $memoKey = $fileId . '|' . implode(',', $identities);
+
+        if (array_key_exists($memoKey, $this->accessMemo)) {
+            return $this->accessMemo[$memoKey];
+        }
+
+        $cursor = $file;
+        $guard  = 0;
+
+        while (true) {
+            if ($this->grantsFor($cursor, $identities, false, $hideFailures) !== []) {
+                return $this->remember($memoKey, true);
+            }
+
+            // A folder with inherited permissions disabled is where the climb ends: Google's own
+            // rule is that only its direct grants, and those of an owner or organizer, reach what is
+            // inside it. Walking past it would carry a grant from above across a boundary Drive
+            // draws deliberately — the folder is "limited access" in the Drive interface.
+            if ($cursor->getInheritedPermissionsDisabled() === true) {
+                return $this->remember($memoKey, false);
+            }
+
+            $parent = ($cursor->getParents() ?? [])[0] ?? null;
+
+            if ($parent === null || $parent === $this->sharedDriveId || ++$guard >= 25) {
+                return $this->remember($memoKey, false);
+            }
+
+            $next = $this->walkFile($parent);
+
+            if ($next === null) {
+                return $this->remember($memoKey, false);
+            }
+
+            $cursor = $next;
+        }
+    }
+
+    /**
+     * Keeps an answer for the rest of the request, unless it rests on a failure that was hidden.
+     *
+     * A "no" produced because the sharing lookup was unreachable is not the same as a "no" because
+     * nothing is shared, and memoising the first would let a listing's hidden failure answer a
+     * later question about one item.
+     */
+    private function remember(string $memoKey, bool $answer): bool
+    {
+        if (!$this->grantLookupUnavailable) {
+            $this->accessMemo[$memoKey] = $answer;
+        }
+
+        return $answer;
     }
 
     /**
@@ -1349,31 +1439,15 @@ class DriveDocumentService implements ResetInterface
             return false;
         }
 
-        $memoKey = $fileId . '|' . implode(',', $identities);
+        $file = $this->walkFile($fileId);
 
-        if (array_key_exists($memoKey, $this->accessMemo)) {
-            return $this->accessMemo[$memoKey];
+        if ($file === null) {
+            return false;
         }
 
-        $cursor = $fileId;
-        $guard  = 0;
-
-        while ($cursor !== null && $cursor !== $this->sharedDriveId && $guard++ < 25) {
-            $file = $this->walkFile($cursor);
-
-            if ($file === null) {
-                return $this->accessMemo[$memoKey] = false;
-            }
-
-            // A single item: an outage has to surface rather than read as "not shared with you".
-            if ($this->isGrantedTo($file, $identities, hideFailures: false)) {
-                return $this->accessMemo[$memoKey] = true;
-            }
-
-            $cursor = ($file->getParents() ?? [])[0] ?? null;
-        }
-
-        return $this->accessMemo[$memoKey] = false;
+        // hideFailures: false — a single item, so an outage has to surface rather than read as
+        // "not shared with you".
+        return $this->reachableBy($file, $identities, false);
     }
 
     /**
@@ -1530,6 +1604,12 @@ class DriveDocumentService implements ResetInterface
 
             foreach ($this->grantsFor($file, $identities, true, hideFailures: false) as $role) {
                 $best = $this->strongerRole($best, $role);
+            }
+
+            // The same boundary reachableBy() stops at, for the same reason: a role held on a
+            // folder above a limited-access one is not held on what is inside it.
+            if ($file->getInheritedPermissionsDisabled() === true) {
+                return $this->roleMemo[$memoKey] = $best;
             }
 
             // Nothing above can beat the strongest role there is, so the rest of the chain cannot
@@ -1712,7 +1792,8 @@ class DriveDocumentService implements ResetInterface
             'driveId'                   => $this->sharedDriveId,
             'includeItemsFromAllDrives' => true,
             'supportsAllDrives'         => true,
-            'fields'                    => 'nextPageToken, files(' . self::FILE_FIELDS . ',permissions(emailAddress,type,role))',
+            'fields'                    => 'nextPageToken, files(' . self::FILE_FIELDS
+                . ',inheritedPermissionsDisabled,permissions(emailAddress,type,role,expirationTime,view))',
             'orderBy'                   => 'folder,modifiedTime desc',
             'pageSize'                  => max(1, min($pageSize, self::MAX_PAGE_SIZE)),
         ];
@@ -1726,9 +1807,11 @@ class DriveDocumentService implements ResetInterface
         $documents = [];
 
         foreach ($response->getFiles() as $file) {
-            // A listing hides what it cannot check, which is documented — one unreachable
-            // lookup must not lose the whole page.
-            if ($filter && !$this->isGrantedTo($file, $identities, hideFailures: true)) {
+            // The same walk canAccess() uses, so the two cannot disagree — a document shared
+            // through its folder belongs in a search for it. hideFailures: true because a listing
+            // hides what it cannot check, which is documented: one unreachable lookup must not
+            // lose the whole page. The ancestors are read once and shared across the items.
+            if ($filter && !$this->reachableBy($file, $identities, true)) {
                 continue;
             }
 
@@ -1864,6 +1947,11 @@ class DriveDocumentService implements ResetInterface
                         continue;
                     }
 
+                    // Sees that it exists, cannot open it. See grantsFor().
+                    if ($permission->getView() === self::VIEW_METADATA) {
+                        continue;
+                    }
+
                     if ($expires !== null) {
                         $soonest = $soonest === null ? $expires : min($soonest, $expires);
                     }
@@ -1919,14 +2007,6 @@ class DriveDocumentService implements ResetInterface
     }
 
     /**
-     * @param string[] $identities normalised e-mail plus the viewer group addresses
-     */
-    private function isGrantedTo(DriveFile $file, array $identities, bool $hideFailures): bool
-    {
-        return $this->grantsFor($file, $identities, false, $hideFailures) !== [];
-    }
-
-    /**
      * The roles the given identities hold on an item, from the file's own permissions when
      * Google sent them and from the dedicated lookup otherwise.
      *
@@ -1963,6 +2043,13 @@ class DriveDocumentService implements ResetInterface
             $expires = $this->expiryTimestamp($permission->getExpirationTime());
 
             if ($expires !== null && $expires <= $now) {
+                continue;
+            }
+
+            // A metadata-only grant lets someone see that an item exists, not open it. Google
+            // produces these on the folders it limits: an inherited grant on such a folder comes
+            // back downgraded to reader with view=metadata, measured against a real drive.
+            if ($permission->getView() === self::VIEW_METADATA) {
                 continue;
             }
 

@@ -87,6 +87,69 @@ final class GoogleClientHttpTest extends TestCase
         }
     }
 
+    /**
+     * @dataProvider transportFailures
+     */
+    public function testAnAmbiguousFailureIsRepeatedOnlyWhereRepeatingIsFree(
+        string $method,
+        ?int $errno,
+        bool $expectRetry
+    ): void {
+        // ConnectException does not mean the request was never sent. Guzzle maps five curl errors to
+        // it, and two of them — a timeout and a server that sent nothing — can happen after Drive
+        // has already acted. Repeating one of those on a POST appends the row twice.
+        $request = new Request($method, 'https://www.googleapis.com/drive/v3/files');
+        $context = $errno === null ? [] : ['errno' => $errno];
+
+        $mock  = new MockHandler([
+            new ConnectException('cURL error', $request, null, $context),
+            new Response(200, [], '{}'),
+        ]);
+        $stack = HandlerStack::create($mock);
+        $stack->push(RetryOnConnectionFailure::middleware(3, 0.0, 0.0));
+
+        $client = new GuzzleClient(['handler' => $stack]);
+
+        if ($expectRetry) {
+            self::assertSame(200, $client->send($request)->getStatusCode());
+            self::assertCount(0, $mock, 'the retry should have consumed the queued response');
+
+            return;
+        }
+
+        try {
+            $client->send($request);
+            self::fail('the failure should have reached the caller instead of being repeated');
+        } catch (ConnectException) {
+            self::assertCount(1, $mock, 'the queued response must be untouched — nothing was retried');
+        }
+    }
+
+    /** @return iterable<string, array{string, int|null, bool}> */
+    public static function transportFailures(): iterable
+    {
+        // Never reached Google, so repeating costs nothing whatever the method is.
+        yield 'POST, could not resolve host'  => ['POST', 6, true];
+        yield 'POST, could not connect'       => ['POST', 7, true];
+        yield 'POST, TLS handshake failed'    => ['POST', 35, true];
+
+        // May have been applied. A read can be repeated; a write cannot.
+        yield 'GET, timed out'                => ['GET', 28, true];
+        yield 'HEAD, server sent nothing'     => ['HEAD', 52, true];
+        yield 'POST, timed out'               => ['POST', 28, false];
+        yield 'POST, server sent nothing'     => ['POST', 52, false];
+        yield 'PATCH, timed out'              => ['PATCH', 28, false];
+        yield 'DELETE, timed out'             => ['DELETE', 28, false];
+
+        // A resumable upload chunk. Idempotent by the specification, not repeated here on purpose.
+        yield 'PUT, timed out'                => ['PUT', 28, false];
+
+        // The handler context is documented as possibly empty, and guessing permissively here would
+        // be guessing that a write did not happen.
+        yield 'POST, no error code at all'    => ['POST', null, false];
+        yield 'GET, no error code at all'     => ['GET', null, true];
+    }
+
     public function testAResponseIsLeftToTheTaskRunner(): void
     {
         // A 429 or a 503 comes back as a response rather than an exception, because http_errors is

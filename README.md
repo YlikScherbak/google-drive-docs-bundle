@@ -1067,7 +1067,7 @@ Google caps an export of a Google-format document at 10 MB, so that path is boun
 happens. `export()` of an **uploaded** file is not, and that is the case to keep in mind.
 
 `export()` returns a `DriveExport` whose `stream` is the response body, so a download
-never passes through your PHP memory:
+is never materialised in PHP memory all at once:
 
 ```php
 use Borsche\GoogleDriveDocsBundle\Model\DriveExport;
@@ -1250,7 +1250,21 @@ is about a file.
 ## How sharing behaves (worth knowing)
 
 - **Inheritance is recursive.** Access granted on a folder applies to every sub-folder and file inside it, at any depth.
-- **Access can be widened, not narrowed.** You can grant extra access deeper in the tree, but you cannot hide a sub-folder from someone who has access to its parent. Keep such material in a separate top-level folder.
+- **Access is widened by default, and can be narrowed at a folder.** Granting extra access deeper
+  in the tree always works. Taking it away needs Drive's **limited access** setting on the folder
+  — `inheritedPermissionsDisabled` over the API — after which permissions from above no longer
+  reach that folder's contents, and only its own grants do. Google downgrades an inherited grant on
+  such a folder to a reader that can see it exists and open nothing, which is how it stays visible
+  in someone's tree without being readable.
+
+  The bundle stops its walk at that boundary, so `canAccess()`, `roleOf()` and `DriveVoter` all
+  refuse an item inside a limited-access folder to someone whose only grant is above it. It does not
+  offer a way to set the flag: turning it on is a decision about a folder's meaning, and Drive's own
+  interface is the better place for it. What the bundle does is honour it.
+
+  A metadata-only grant is not treated as access here. If you want to show such a folder in a tree
+  as a locked node, that is a different question from the one `canAccess()` answers, and it needs
+  `listFolder()` on the parent rather than an access check on the folder.
 - **Inherited permissions cannot be revoked on the child.** Google rejects it; the bundle turns that into `InheritedPermissionException` and flags those entries with `inherited: true` so your UI can hide the button.
 - **Editing happens under the viewer's own Google session.** Anyone who should edit a document needs a Google account that has been granted access to it.
 - **Visibility filtering is application-level.** If your users are members of the Shared Drive itself, Google grants them access to everything regardless of what your UI shows. For real isolation, do not add users as drive members — share individual folders instead.

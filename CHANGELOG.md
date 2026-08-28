@@ -6,6 +6,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A grant above a limited-access folder reached the documents inside it.** Drive can mark a folder
+  so that permissions from above no longer apply to its contents — "limited access" in the
+  interface, `inheritedPermissionsDisabled` over the API. The walk up the parents did not know about
+  it and climbed straight past, so a viewer with `writer` on an outer folder was reported as `writer`
+  on a document inside the limited one, and `DriveVoter` granted `DRIVE_EDIT`, `DRIVE_SHARE` and
+  `DRIVE_DELETE` on it. The walk stops at that boundary now.
+
+  Measured against a real drive rather than read off a page, and the mechanism is not quite what it
+  looks like: Google does **not** report the outer grant on the file inside. What it does is
+  downgrade that grant on the limited folder itself to a reader with `view=metadata` — enough to see
+  the folder exists. So the way across the boundary was to keep climbing to the outer folder, where
+  the grant is direct and undowngraded.
+
+  A metadata-only grant is no longer treated as access either, which is the second half of the same
+  fix: reading Drive's downgrade as permission takes a refusal for a grant.
+
+- **An ambiguous transport failure is no longer repeated on a write.** The retry added in 1.1.0
+  repeated every `ConnectException`, on the reasoning that a connection which never opened cannot
+  have been acted on. That reasoning was wrong: Guzzle maps five curl errors to that exception and
+  two of them say nothing about whether Google acted — a timeout (28) and a server that sent nothing
+  (52) can both happen after Drive has appended the row. So a timed-out `append()` was sent again
+  and the row was written twice.
+
+  The three that really cannot have been sent — could not resolve host, could not connect, TLS
+  handshake — are still retried whatever the method is. For the other two, and for a handler that
+  reports no error code at all, only the methods with no side effects are repeated. A `POST` that may
+  have been applied reaches the caller as a failure, because a duplicated row is worse than an error
+  someone can see.
+
+### Fixed
+
+- **A document shared through its folder went missing from every whole-drive listing.** `canAccess()`
+  walks up the parents; the listings filtered per item and did not, which was the same answer until
+  1.1.0 stopped caching inherited grants under the child. After that a document reachable by its
+  folder's grant was absent from `search()`, `findByAppProperty()`, `listTrash()` and their paged
+  forms — fail-closed, and still most of how anyone finds anything. Both now go through one walk,
+  which also means one memo: the folders a page shares are read once, not once per item.
+- `forDrive()` carries the logger over. Without it a clone stopped reporting the sharing lookups it
+  hides, which is the one thing nothing else records.
+
+### Documentation
+
+- "Access can be widened, not narrowed" was true before Drive had limited-access folders and is not
+  now. What replaces it says what the setting does, what Google's downgrade means, and that the
+  bundle honours the flag rather than offering to set it.
+- `export()` "never passes through your PHP memory" overstated the paragraph above it, which already
+  says the body is buffered into `php://temp` and spills to disk past about 2 MB. It now says the
+  download is never materialised in PHP memory all at once, which is what actually happens.
+
 ## [1.1.1] - 2026-08-27
 
 ### Fixed

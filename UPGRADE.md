@@ -6,6 +6,31 @@ deliberate constraint bump, and this file says what each one asked of you.
 
 From 1.0 onwards that changes — see [The promise from 1.0](#the-promise-from-10) at the end.
 
+## 1.1.x → 1.1.2
+
+`^1.1` picks this up on its own. Two corrections change behaviour, and both tighten rather than
+loosen — but read the first if anyone in your Shared Drive uses limited-access folders.
+
+### A grant above a limited-access folder no longer reaches inside it
+
+Drive can mark a folder so that permissions from above stop applying to its contents. The walk up
+the parents did not know about it, so someone with access to an outer folder was reported as having
+the same role on documents inside the limited one. That is now refused, by `canAccess()`, by
+`roleOf()` and by `DriveVoter`.
+
+If your application depended on the old answer — a user who could reach such a document and now
+cannot — the fix is a direct grant on the limited folder, which is what limited access is for.
+
+### An ambiguous transport failure is no longer retried on a write
+
+A timeout, or a server that closes without answering, can happen after Drive has already applied the
+request. Those are no longer repeated for `POST`, `PATCH`, `PUT` or `DELETE`: the failure reaches you
+instead, and it is yours to decide whether to try again. Connection failures that really cannot have
+been sent — DNS, connect, TLS — are still retried for every method.
+
+So a write may now surface a `ConnectException` where 1.1.0 and 1.1.1 quietly repeated it. That
+repeat is what could append the same row twice.
+
 ## 1.0.x → 1.1.0
 
 `^1.0` picks this up on its own, and nothing was removed. But it corrects four behaviours, and two
