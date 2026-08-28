@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-08-28
+
 ### Added
 - **A release workflow that tags only after everything has passed.** Two releases went out with a
   red build behind them, because tagging and checking were separate acts and the tag went first:
@@ -903,7 +905,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.4...HEAD
+[1.1.4]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.0...v1.1.1
