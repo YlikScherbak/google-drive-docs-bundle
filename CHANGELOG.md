@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.6] - 2026-08-29
+
 ### Fixed
 - **A document shared through its folder was missing from every search.** `canAccess()` answered
   200 for it, the folder listing showed it, and a search for it came back without it — silently,
@@ -938,7 +940,8 @@ The public API is settled. From here on, minor releases add and only a major one
 - OAuth refresh-token authentication and a console command to obtain the token
 - `ViewerContextInterface` extension point so the host application decides who sees what
 
-[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.5...HEAD
+[Unreleased]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.6...HEAD
+[1.1.6]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/YlikScherbak/google-drive-docs-bundle/compare/v1.1.2...v1.1.3
