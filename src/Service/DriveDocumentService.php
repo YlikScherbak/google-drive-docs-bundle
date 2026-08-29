@@ -1798,8 +1798,14 @@ class DriveDocumentService implements ResetInterface
             'driveId'                   => $this->sharedDriveId,
             'includeItemsFromAllDrives' => true,
             'supportsAllDrives'         => true,
+            // parents because the walk below climbs from the object this returns rather than
+            // re-fetching it, and Drive fills in only what it was asked for: without them the
+            // climb ends at the first step and everything reachable through a folder disappears
+            // from the results. Not in FILE_FIELDS, where thirteen other callers have no use for
+            // them.
             'fields'                    => 'nextPageToken, files(' . self::FILE_FIELDS
-                . ',inheritedPermissionsDisabled,permissions(emailAddress,type,role,expirationTime,view))',
+                . ',parents,inheritedPermissionsDisabled,'
+                . 'permissions(emailAddress,type,role,expirationTime,view))',
             'orderBy'                   => 'folder,modifiedTime desc',
             'pageSize'                  => max(1, min($pageSize, self::MAX_PAGE_SIZE)),
         ];
@@ -1813,8 +1819,10 @@ class DriveDocumentService implements ResetInterface
         $documents = [];
 
         foreach ($response->getFiles() as $file) {
-            // The same walk canAccess() uses, so the two cannot disagree — a document shared
-            // through its folder belongs in a search for it. hideFailures: true because a listing
+            // The same walk canAccess() uses — and it agrees with it only for as long as the
+            // mask above carries every field the walk reads. It did not: `parents` was missing,
+            // and a document shared through its folder was answered 200 by canAccess() and left
+            // out of every search, in silence, until 1.1.6. hideFailures: true because a listing
             // hides what it cannot check, which is documented: one unreachable lookup must not
             // lose the whole page. The ancestors are read once and shared across the items.
             if ($filter && !$this->reachableBy($file, $identities, true)) {

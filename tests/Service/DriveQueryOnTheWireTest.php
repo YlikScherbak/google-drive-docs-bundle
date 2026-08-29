@@ -139,6 +139,109 @@ final class DriveQueryOnTheWireTest extends TestCase
         self::assertContains('view', $this->sentFields(0), 'files.get must ask for view too');
     }
 
+    public function testTheListingAsksForEveryFieldTheAccessWalkReads(): void
+    {
+        // reachableBy() climbs with getParents(), and the object it climbs from is the one this
+        // listing returned — not a re-fetch. Drive fills in only what it was asked for, so a mask
+        // short of `parents` ends the climb at the first step and the item is dropped in silence.
+        $this->drive()->searchPage('Test');
+
+        $fields = $this->sentFields(0);
+
+        foreach (['id', 'parents', 'permissions', 'inheritedPermissionsDisabled'] as $needed) {
+            self::assertContains(
+                $needed,
+                $fields,
+                sprintf('the walk reads %s, so the listing has to ask Drive for it', $needed)
+            );
+        }
+    }
+
+    /**
+     * A document reachable only through its folder has to survive the search filter.
+     *
+     * The fixture below answers the way Drive does — it returns `parents` only to a request that
+     * asked for them — because a fixture that volunteers the field would pass against the very
+     * bug this exists for.
+     */
+    public function testADocumentSharedThroughItsFolderIsFound(): void
+    {
+        $stack = HandlerStack::create($this->driveThatHonoursTheFieldsMask());
+        $stack->push(Middleware::history($this->history));
+
+        $client = new Client();
+        $client->setHttpClient(new GuzzleClient(['handler' => $stack]));
+
+        $service = new DriveDocumentService(
+            new Drive($client),
+            new FakeViewerContext('viewer@example.com', false),
+            self::DRIVE_ID,
+            ['application/vnd.google-apps.spreadsheet']
+        );
+
+        $page = $service->searchPage('Test');
+
+        self::assertCount(
+            1,
+            $page,
+            'the document is shared through its folder, and canAccess() says so — a search must agree'
+        );
+    }
+
+    /**
+     * Drive as far as the access walk is concerned: one document with no grant of its own, inside
+     * one folder that carries the viewer's grant.
+     *
+     * The rule it enforces is the one the bundle keeps relearning — a field left out of the mask
+     * comes back absent, not merely unread.
+     */
+    private function driveThatHonoursTheFieldsMask(): callable
+    {
+        return static function (\Psr\Http\Message\RequestInterface $request) {
+            $path = $request->getUri()->getPath();
+            parse_str($request->getUri()->getQuery(), $query);
+
+            $asked = preg_split('/[\s,()]+/', (string) ($query['fields'] ?? ''), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
+            $json = static fn (array $body): \GuzzleHttp\Promise\PromiseInterface
+                => \GuzzleHttp\Promise\Create::promiseFor(
+                    new Response(200, ['Content-Type' => 'application/json'], json_encode($body, JSON_THROW_ON_ERROR))
+                );
+
+            // permissions.list on either item.
+            if (str_ends_with($path, '/permissions')) {
+                $subject = basename(dirname($path));
+
+                // Only the folder carries a grant, and it is the viewer's own rather than one
+                // inherited from somewhere above.
+                return $json($subject === 'folder-1' ? ['permissions' => [[
+                    'emailAddress'      => 'viewer@example.com',
+                    'type'              => 'user',
+                    'role'              => 'writer',
+                    'permissionDetails' => [['inherited' => false]],
+                ]]] : ['permissions' => []]);
+            }
+
+            // files.get, which is how the walk reads an ancestor.
+            if (!str_ends_with($path, '/files')) {
+                return $json(['id' => basename($path), 'parents' => [self::DRIVE_ID]]);
+            }
+
+            // files.list — and this is the point of the fixture.
+            $file = [
+                'id'       => 'doc-1',
+                'name'     => 'Test document',
+                'mimeType' => 'application/vnd.google-apps.spreadsheet',
+            ];
+
+            if (in_array('parents', $asked, true)) {
+                $file['parents'] = ['folder-1'];
+            }
+
+            return $json(['files' => [$file]]);
+        };
+    }
+
     public function testAPercentEncodedQuoteCannotCloseTheStringLiteral(): void
     {
         // The payload carries no literal quote, so escaping the two characters the bundle used to

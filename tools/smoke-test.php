@@ -711,8 +711,38 @@ try {
 
     if ($secondEmail === null) {
         skip('roleOf() inherits from a parent folder', 'set SMOKE_SECOND_EMAIL to a second Google address');
+        skip('search() hides what the viewer cannot reach', 'set SMOKE_SECOND_EMAIL to a second Google address');
+        skip('search() finds what a folder grant reaches', 'set SMOKE_SECOND_EMAIL to a second Google address');
         skip('setExpiry(..., null) lifts an expiry', 'set SMOKE_SECOND_EMAIL to a second Google address');
     } elseif ($sheetId !== null) {
+        // The control for the check further down: without it, "the search found it" proves
+        // nothing, because a search that finds everything would pass too. This is also the
+        // reading that stayed wrong until 1.1.6 — the filter answered "no" for the right
+        // reason here and for the wrong one there.
+        check('search() hides what the viewer cannot reach', static function () use ($drive, $viewer, $secondEmail, $stamp) {
+            $viewer->everything = false;
+            $viewer->email      = $secondEmail;
+
+            try {
+                $hits = $drive->search(PREFIX . 'sheet_' . $stamp);
+
+                assertTrue($hits === [], sprintf(
+                    'the search returned %d item(s) before any grant was made — if this address is '
+                    . 'a member of the shared drive it can see everything, and the differential '
+                    . 'below cannot be measured with it',
+                    count($hits)
+                ));
+            } finally {
+                $viewer->everything = true;
+                $viewer->email      = null;
+                // The walk memoises its answers for the life of the process, and the grant made
+                // next changes the answer. Symfony calls this between requests; a script does not.
+                $drive->reset();
+            }
+
+            return null;
+        });
+
         $permission = check('grant() on the folder', static function () use ($drive, $folderId, $secondEmail) {
             return $drive->grant($folderId, $secondEmail, 'writer');
         });
@@ -728,6 +758,34 @@ try {
             } finally {
                 $viewer->everything = true;
                 $viewer->email      = null;
+            }
+
+            return null;
+        });
+
+        // The bug this was written for: canAccess() said yes, the folder listing showed it, and
+        // the search left it out in silence. The two answers come from the same walk, and they
+        // agree only while the listing's field mask carries everything that walk reads.
+        check('search() finds what a folder grant reaches', static function () use ($drive, $viewer, $sheetId, $secondEmail, $stamp) {
+            $viewer->everything = false;
+            $viewer->email      = $secondEmail;
+
+            try {
+                assertTrue($drive->canAccess($sheetId), 'the viewer cannot reach the file at all');
+
+                $found = eventually(static function () use ($drive, $stamp) {
+                    // Each attempt from a clean slate: a "no" from the first one would otherwise
+                    // be remembered and every retry would read it back instead of asking again.
+                    $drive->reset();
+
+                    return $drive->search(PREFIX . 'sheet_' . $stamp) !== [];
+                });
+
+                assertTrue($found, 'canAccess() says yes and the search still does not list it');
+            } finally {
+                $viewer->everything = true;
+                $viewer->email      = null;
+                $drive->reset();
             }
 
             return null;

@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A document shared through its folder was missing from every search.** `canAccess()` answered
+  200 for it, the folder listing showed it, and a search for it came back without it — silently,
+  with nothing in the log, because nothing had failed. The access walk climbs with `parents`, and
+  it climbs from the object the listing returned rather than re-fetching it; the listing's field
+  mask did not ask for `parents`, and Drive fills in only what it is asked for. So the climb ended
+  at the first step and everything reachable only through a folder was dropped from the results.
+  Only searches were affected: entering a folder checks the folder once and switches per-item
+  filtering off, and the root listing's items have the drive itself as their parent.
+
+  This is the third bug of one shape — a field the code reads and the mask never requested. The
+  comment above the filter claimed the search and `canAccess()` "cannot disagree"; it now says what
+  that depends on. The listing's mask is asserted against the fields the walk reads, on the wire,
+  and the live test gained the differential that would have caught it: a document reachable only
+  through its folder, searched for as someone who is not a member of the drive, with the negative
+  control that the same search finds nothing before the grant is made.
+
 ## [1.1.5] - 2026-08-29
 
 ### Fixed
