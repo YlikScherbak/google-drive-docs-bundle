@@ -11,7 +11,10 @@ use Borsche\GoogleDriveDocsBundle\DependencyInjection\GoogleDriveDocsExtension;
 use Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService;
 use Borsche\GoogleDriveDocsBundle\Service\SpreadsheetService;
 use PHPUnit\Framework\TestCase;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\Definition;
 
 final class GoogleDriveDocsExtensionTest extends TestCase
 {
@@ -124,5 +127,70 @@ final class GoogleDriveDocsExtensionTest extends TestCase
         self::assertSame(5, $arguments[3]);
         self::assertSame(0.25, $arguments[4]);
         self::assertSame(10.0, $arguments[5]);
+    }
+
+    /**
+     * The logger has to be wired here, because an application cannot wire it itself.
+     *
+     * README used to say to pass it in services.yaml under the service's own id. That does not
+     * amend this definition, it replaces it: ten arguments become one, and the build then dies
+     * autowiring $drive, which is registered as google_drive_docs.drive and not under its class.
+     * So the one thing separating "hidden because the lookup failed" from "not shared with you"
+     * was unreachable from a Symfony application altogether.
+     */
+    public function testTheLoggerIsWiredWithNoConfigurationAtAll(): void
+    {
+        $container = new ContainerBuilder();
+
+        // A definition, not an object set on the container: only a definition survives
+        // ResolveInvalidReferencesPass, and an application registers its logger as one.
+        $container->setDefinition('logger', (new Definition(NullLogger::class))->setPublic(true));
+
+        (new GoogleDriveDocsExtension())->load([['shared_drive_id' => 'drive']], $container);
+        $container->compile();
+
+        $service = $container->get('google_drive_docs.service');
+        self::assertInstanceOf(DriveDocumentService::class, $service);
+
+        // Asserted on the built service rather than on the definition: a definition can hold a
+        // reference that never arrives, which is the shape of the bug this replaces.
+        self::assertSame($container->get('logger'), self::loggerOf($service));
+    }
+
+    /** And an application with no logger at all still boots, like the dispatcher above it. */
+    public function testTheServiceBootsWithoutALogger(): void
+    {
+        $container = new ContainerBuilder();
+
+        (new GoogleDriveDocsExtension())->load([['shared_drive_id' => 'drive']], $container);
+        $container->compile();
+
+        $service = $container->get('google_drive_docs.service');
+        self::assertInstanceOf(DriveDocumentService::class, $service);
+        self::assertNull(self::loggerOf($service));
+    }
+
+    /**
+     * Its own Monolog channel, which is what wanting "your own logger" usually means: a level and
+     * a handler set in monolog.yaml, rather than a service id passed to this bundle.
+     */
+    public function testTheLoggerGoesToItsOwnChannel(): void
+    {
+        $container = new ContainerBuilder();
+
+        (new GoogleDriveDocsExtension())->load([['shared_drive_id' => 'drive']], $container);
+
+        self::assertSame(
+            [['channel' => 'google_drive_docs']],
+            $container->getDefinition(DriveDocumentService::class)->getTag('monolog.logger')
+        );
+    }
+
+    private static function loggerOf(DriveDocumentService $service): ?LoggerInterface
+    {
+        $logger = (new \ReflectionProperty(DriveDocumentService::class, 'logger'))->getValue($service);
+        self::assertTrue($logger === null || $logger instanceof LoggerInterface);
+
+        return $logger;
     }
 }

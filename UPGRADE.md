@@ -81,9 +81,10 @@ google_drive_docs:
 Both are new defaults rather than new options with the old behaviour: before this, a request with no
 answer waited for ever. Set either to `0` for that back.
 
-A PSR-3 logger can be passed as the service's last constructor argument, and it is worth doing — it
-is where you find out that a document was hidden from a listing because the sharing lookup failed
-rather than because it was not shared.
+A hidden sharing failure is logged — it is where you find out that a document was missing from a
+listing because the lookup failed rather than because it was not shared. Until 1.1.5 the logger had
+to be passed as the service's last constructor argument, which a Symfony application had no way to
+do; it is wired for you now, on the `google_drive_docs` channel. Nothing to change.
 
 ## 0.9.x → 1.0.0
 

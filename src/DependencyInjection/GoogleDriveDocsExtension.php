@@ -84,6 +84,11 @@ class GoogleDriveDocsExtension extends Extension
             $config['permission_cache']['ttl'],
             $config['upload']['max_bytes'],
             $config['upload']['chunk_bytes'],
+            // Wired here because an application cannot wire it itself: naming this service in
+            // services.yaml to add one argument replaces this definition rather than amending it,
+            // and the build then dies autowiring $drive. Optional like the dispatcher above, so an
+            // application without a logger still boots.
+            new Reference('logger', ContainerInterface::NULL_ON_INVALID_REFERENCE),
         ]);
 
         // Checked after every bundle registered its services (see ValidateCachePoolPass).
@@ -91,6 +96,9 @@ class GoogleDriveDocsExtension extends Extension
         $service->setPublic(true);
         // The per-request sharing memo has to be cleared between requests in a worker runtime.
         $service->addTag('kernel.reset', ['method' => 'reset']);
+        // Monolog swaps the reference above for a channel of our own, so an application sets the
+        // level and handler for these lines in monolog.yaml. Inert without MonologBundle.
+        $service->addTag('monolog.logger', ['channel' => 'google_drive_docs']);
         $container->setDefinition(DriveDocumentService::class, $service);
         $container->setAlias('google_drive_docs.service', DriveDocumentService::class)->setPublic(true);
 

@@ -1393,15 +1393,26 @@ hides what it cannot check — losing one lookup must not lose the page — and 
 it stops trying for the rest of the request rather than repeating the retry ladder once per item; a
 page of a thousand items used to sleep through that ladder a thousand times and return nothing. A
 question about **one** item raises the error instead, because answering "not shared with you" would
-turn an outage into a denial that the caller cannot tell apart from a real one. Pass a PSR-3 logger
-as the last constructor argument to see the hidden ones:
+turn an outage into a denial that the caller cannot tell apart from a real one. The hidden ones are
+logged at warning level, with the file id and Google's own reason, once per request rather than once
+per item.
+
+Nothing needs passing: the bundle wires your logger itself, and writes to a channel of its own, so
+the level and the handler are all there is to set.
 
 ```yaml
-services:
-    Borsche\GoogleDriveDocsBundle\Service\DriveDocumentService:
-        arguments:
-            $logger: '@logger'
+# config/packages/monolog.yaml
+monolog:
+    channels: ['google_drive_docs']
+    handlers:
+        drive:
+            type:     stream
+            path:     '%kernel.logs_dir%/drive.log'
+            level:    warning
+            channels: ['google_drive_docs']
 ```
+
+With no logger installed the bundle is silent and boots the same.
 
 Caching is entirely optional: with no pool configured the bundle simply queries Google every
 time. If the configured pool does not exist, the application still boots — you get a note

@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The logger is wired by the bundle, because an application could not wire it itself.** The
+  optional PSR-3 logger added in 1.1.0 was reachable only by constructing the service by hand:
+  README said to pass it in `services.yaml` under the service's own id, and naming a service there
+  replaces the bundle's definition rather than amending it — ten arguments become one, and the
+  build then dies autowiring `$drive`, which is registered as `google_drive_docs.drive` and not
+  under its class. So the one thing that separates "hidden because the lookup failed" from "not
+  shared with you" could not be turned on at all. It is now wired unconditionally, on its own
+  `google_drive_docs` Monolog channel, and an application with no logger still boots.
+
+### Documentation
+- The logger section of README told people to do the thing that breaks the container. It now shows
+  the Monolog channel instead, which is the part there is any point configuring.
+
 ## [1.1.4] - 2026-08-28
 
 ### Added
